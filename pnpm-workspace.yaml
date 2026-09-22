@@ -1,0 +1,8 @@
+# Single-package workspace file. In pnpm >= 10 this file is also the place for
+# pnpm settings. Since pnpm 12, dependency build-script approval uses the
+# `allowBuilds` map (true = allowed to run its postinstall/build scripts).
+allowBuilds:
+  "@prisma/client": true
+  "@prisma/engines": true
+  esbuild: true
+  prisma: true

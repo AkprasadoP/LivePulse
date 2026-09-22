@@ -1,0 +1,185 @@
+// LivePulse — domain schema (Phase 1).
+// Documented in docs/database/schema.md; decisions in docs/decisions/002-domain-schema.md.
+// Redis-specific structures are deliberately absent: PostgreSQL is the durable
+// source of truth only.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SessionState {
+  CREATED
+  LIVE
+  ENDED
+}
+
+enum ParticipantRole {
+  TEACHER
+  STUDENT
+}
+
+enum QuizState {
+  DRAFT
+  ACTIVE
+  COMPLETED
+}
+
+enum QuestionState {
+  DRAFT
+  PUBLISHED
+  CLOSED
+}
+
+enum DoubtStatus {
+  OPEN
+  RESOLVED
+}
+
+/// Global identity. No credentials yet (authentication is a later phase);
+/// displayName is intentionally NOT unique — documented in ADR-002.
+model User {
+  id        String   @id @default(uuid(7))
+  displayName String @db.VarChar(100)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  createdSessions       Session[]             @relation("SessionCreator")
+  sessionParticipations SessionParticipant[]
+
+  @@map("users")
+}
+
+/// A live classroom with an explicit lifecycle:
+/// CREATED -> LIVE -> ENDED, plus CREATED -> ENDED (cancel before live).
+/// Transitions are enforced by atomic conditional updates in
+/// SessionRepository — see ADR-002 for why there is no trigger (yet).
+model Session {
+  id        String       @id @default(uuid(7))
+  name      String       @db.VarChar(200)
+  state     SessionState @default(CREATED)
+  creatorId String
+  startedAt DateTime?    @db.Timestamptz(6)
+  endedAt   DateTime?    @db.Timestamptz(6)
+  createdAt DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(6)
+
+  creator User @relation("SessionCreator", fields: [creatorId], references: [id], onDelete: Restrict)
+
+  participants SessionParticipant[]
+  quizzes      Quiz[]
+  doubts       Doubt[]
+
+  @@index([creatorId])
+  @@map("sessions")
+}
+
+/// User-in-a-session with session-scoped state (role, join time).
+/// UNIQUE (sessionId, userId): one membership per user per session.
+model SessionParticipant {
+  id        String          @id @default(uuid(7))
+  sessionId String
+  userId    String
+  role      ParticipantRole @default(STUDENT)
+  joinedAt  DateTime        @default(now()) @db.Timestamptz(6)
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  answers Answer[]
+  doubts  Doubt[]
+
+  @@unique([sessionId, userId])
+  @@index([userId])
+  @@map("session_participants")
+}
+
+/// A quiz run inside a session. Modeled lifecycle DRAFT -> ACTIVE ->
+/// COMPLETED; transitions are driven by teacher actions in a later phase.
+model Quiz {
+  id        String    @id @default(uuid(7))
+  sessionId String
+  title     String    @db.VarChar(200)
+  state     QuizState @default(DRAFT)
+  startedAt DateTime? @db.Timestamptz(6)
+  endedAt   DateTime? @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  questions Question[]
+
+  @@index([sessionId])
+  @@map("quizzes")
+}
+
+/// One quiz item. UNIQUE (quizId, position) gives deterministic delivery
+/// order. correctAnswer is nullable: unkeyed questions stay ungraded.
+/// firstCorrectWins is the Phase 4 semantics flag.
+model Question {
+  id               String        @id @default(uuid(7))
+  quizId           String
+  position         Int
+  prompt           String        @db.Text
+  correctAnswer    String?       @db.Text
+  firstCorrectWins Boolean       @default(true)
+  state            QuestionState @default(DRAFT)
+  createdAt        DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime      @updatedAt @db.Timestamptz(6)
+
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  answers Answer[]
+
+  @@unique([quizId, position])
+  @@map("questions")
+}
+
+/// A participant's submission. Append-style rows with attemptNumber support
+/// retry policies; UNIQUE (questionId, participantId, attemptNumber) makes
+/// duplicate attempts impossible at the database level. No winner columns:
+/// first-correct-wins election is a Phase 4 decision (see ADR-002).
+model Answer {
+  id            String   @id @default(uuid(7))
+  questionId    String
+  participantId String
+  content       String   @db.Text
+  attemptNumber Int      @default(1)
+  isCorrect     Boolean?
+  submittedAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  question    Question           @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  participant SessionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@unique([questionId, participantId, attemptNumber])
+  @@index([questionId, submittedAt])
+  @@index([participantId])
+  @@map("answers")
+}
+
+/// Durable record of a doubt raised in a session. The live queue ordering
+/// will live in Redis in a later phase; this index already matches the
+/// documented queue query (priority DESC, createdAt ASC within open doubts).
+model Doubt {
+  id            String      @id @default(uuid(7))
+  sessionId     String
+  participantId String
+  content       String      @db.Text
+  priority      Int         @default(0)
+  status        DoubtStatus @default(OPEN)
+  resolvedAt    DateTime?   @db.Timestamptz(6)
+  createdAt     DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @db.Timestamptz(6)
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  participant SessionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, status, priority(sort: Desc), createdAt(sort: Asc)])
+  @@index([participantId])
+  @@map("doubts")
+}

@@ -1,0 +1,40 @@
+# Local development dependencies only: PostgreSQL + Redis.
+# Deliberately minimal — Nginx, multiple app instances, Prometheus and Grafana are added
+# in later phases when the system actually reaches them (see AGENT.md §18).
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: livepulse-postgres
+    environment:
+      POSTGRES_USER: livepulse
+      POSTGRES_PASSWORD: livepulse
+      POSTGRES_DB: livepulse
+    ports:
+      # Host 5433 to avoid colliding with a local Postgres that may already
+      # listen on 5432. Container-internal port stays 5432.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U livepulse -d livepulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: livepulse-redis
+    # No persistence commands yet: Redis is not a durable source of truth.
+    # Persistence policy is a deliberate decision for a later phase.
+    ports:
+      # Host 6380 to avoid colliding with a local Redis on 6379.
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
