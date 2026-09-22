@@ -7,11 +7,11 @@ import { loadConfig, loadEnvFile, ConfigValidationError, type AppConfig } from "
  * Responsibilities:
  *  1. Load `.env` (real environment variables still take precedence).
  *  2. Load and validate configuration — fail fast, before anything else.
- *  3. Build and start the Fastify application.
+ *  3. Build the app: HTTP listener + WebSocket layer on one shared server.
  *  4. Install SIGINT/SIGTERM handlers for graceful shutdown.
  *
- * Intentionally NO business logic, WebSockets or Redis here — this phase only
- * proves the skeleton starts, serves /health and shuts down cleanly.
+ * The WebSocket layer is torn down by the app's onClose hook (sockets closed
+ * 1001, heartbeat stopped, upgrade listener removed) as part of app.close().
  */
 async function main(): Promise<void> {
   loadEnvFile();
@@ -27,14 +27,8 @@ async function main(): Promise<void> {
     throw error;
   }
 
-  const app = await buildApp({ config });
-
-  try {
-    await app.listen({ port: config.PORT, host: "0.0.0.0" });
-  } catch (error) {
-    app.log.error({ err: error }, "Failed to start server");
-    process.exit(1);
-  }
+  const app = await buildApp({ config, listen: true });
+  app.log.info({ port: config.PORT }, "HTTP and WebSocket server listening");
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
@@ -43,7 +37,8 @@ async function main(): Promise<void> {
     app.log.info({ signal }, "Graceful shutdown starting");
     try {
       // app.close() runs Fastify lifecycle hooks in order: stop accepting
-      // connections, await in-flight requests, onClose hooks ($disconnect etc.).
+      // connections, await in-flight requests, close WS layer, onClose hooks
+      // ($disconnect etc.).
       await app.close();
       app.log.info("Graceful shutdown complete");
       process.exit(0);

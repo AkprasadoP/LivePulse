@@ -1,7 +1,8 @@
-# LivePulse — HTTP API (Phase 1)
+# LivePulse — HTTP API (Phase 1 + Phase 2 additions)
 
-Only the endpoints implemented in Phase 1 are documented here. Authentication,
-WebSockets, answer submission and the doubt queue do not exist yet.
+Only the endpoints actually implemented are documented here. Authentication,
+answer submission and the doubt queue do not exist yet. The WebSocket
+surface is documented separately in `docs/api/websocket-protocol.md`.
 
 All responses are JSON. Errors use one consistent envelope:
 
@@ -20,6 +21,25 @@ All responses are JSON. Errors use one consistent envelope:
 | 404    | referenced resource does not exist                                            |
 | 409    | invalid state transition, or a uniqueness constraint would be violated        |
 | 500    | unexpected server error (details are logged, never leaked)                    |
+
+---
+
+## GET /ws (plain HTTP)
+
+Added in Phase 2. A plain HTTP `GET /ws` — without an `Upgrade: websocket`
+header — is answered with:
+
+```json
+{
+  "statusCode": 426,
+  "error": "Upgrade Required",
+  "message": "WebSocket connections must use the ws:// protocol at /ws"
+}
+```
+
+WebSocket upgrades at `/ws` are not part of the HTTP API; see
+`docs/api/websocket-protocol.md`. Upgrades on any other path are rejected by
+closing the TCP connection before the handshake.
 
 ---
 

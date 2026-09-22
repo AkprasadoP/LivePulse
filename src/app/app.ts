@@ -8,9 +8,23 @@ import { healthRoutes } from "./routes/health.js";
 import { sessionRoutes } from "../modules/sessions/session.routes.js";
 import { quizRoutes } from "../modules/quizzes/quiz.routes.js";
 import { NotFoundError, InvalidStateTransitionError } from "../shared/errors.js";
+import { attachWebSocketLayer, type WebSocketLayer } from "../ws/index.js";
+
+declare module "fastify" {
+  interface FastifyInstance {
+    /** Present (non-null) only when the app was built with listen: true. */
+    wsLayer: WebSocketLayer | null;
+  }
+}
 
 export interface BuildAppOptions {
   config: AppConfig;
+  /**
+   * When true, buildApp starts the HTTP listener and attaches the WebSocket
+   * layer to the same server (Phase 2). Default false: tests use fastify
+   * inject() over HTTP and explicit WS suites pass listen: true.
+   */
+  listen?: boolean;
 }
 
 /**
@@ -118,6 +132,38 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.get("/", async () => {
     return { name: "livepulse", status: "ok" };
   });
+
+  app.decorate("wsLayer", null);
+
+  // Plain-HTTP GET /ws without an Upgrade header -> 426 (curl-able, testable).
+  // Registered with the other routes, BEFORE listening — Fastify rejects
+  // routes added after the server has started.
+  app.get("/ws", async (_request, reply) => {
+    return reply.code(426).send({
+      statusCode: 426,
+      error: "Upgrade Required",
+      message: "WebSocket connections must use the ws:// protocol at /ws",
+    });
+  });
+
+  // WebSocket teardown must happen BEFORE the HTTP server closes: Node's
+  // server.close() waits for open (upgraded) TCP sockets, and only the WS
+  // layer can close them. Fastify runs "preClose" hooks before server.close
+  // and "onClose" hooks after — using onClose here would deadlock shutdown.
+  // Async preClose handlers take no arguments (Fastify's documented pattern).
+  app.addHook("preClose", async () => {
+    await app.wsLayer?.close();
+  });
+
+  await app.ready();
+
+  if (options.listen === true) {
+    // Attach the WS layer BEFORE listening: it registers the upgrade listener
+    // on Fastify's shared HTTP server (one port serves HTTP and WS). It must
+    // run after ready() because it reads app.prisma and app.log.
+    app.wsLayer = attachWebSocketLayer({ config, httpServer: app.server, app });
+    await app.listen({ port: config.PORT, host: "0.0.0.0" });
+  }
 
   return app;
 }

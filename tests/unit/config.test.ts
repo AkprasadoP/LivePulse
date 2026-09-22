@@ -28,9 +28,12 @@ describe("loadConfig", () => {
 
   it("coerces PORT from a string and rejects out-of-range values", () => {
     expect(loadConfig({ ...validEnv, PORT: "8080" }).PORT).toBe(8080);
-    expect(() => loadConfig({ ...validEnv, PORT: "0" })).toThrow(ConfigValidationError);
+    // 0 is explicitly allowed: OS-assigned ephemeral port (used by WS tests).
+    expect(loadConfig({ ...validEnv, PORT: "0" }).PORT).toBe(0);
     expect(() => loadConfig({ ...validEnv, PORT: "70000" })).toThrow(ConfigValidationError);
+    expect(() => loadConfig({ ...validEnv, PORT: "65536" })).toThrow(ConfigValidationError);
     expect(() => loadConfig({ ...validEnv, PORT: "not-a-number" })).toThrow(ConfigValidationError);
+    expect(() => loadConfig({ ...validEnv, PORT: "-1" })).toThrow(ConfigValidationError);
   });
 
   it("rejects an invalid NODE_ENV value", () => {

@@ -9,7 +9,9 @@ import { z } from "zod";
  */
 export const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
+  // 0 is allowed and means "OS-assigned ephemeral port" (used by tests);
+  // real deployments should always pin a concrete port.
+  PORT: z.coerce.number().int().min(0).max(65_535).default(3000),
   DATABASE_URL: z
     .string()
     .min(1, "DATABASE_URL is required")
@@ -25,6 +27,12 @@ export const envSchema = z.object({
       "REDIS_URL must be a redis:// connection string",
     ),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
+  /**
+   * WebSocket server-side heartbeat interval (ms). The server pings every
+   * connection on this cadence; a connection that misses one pong is
+   * considered dead and terminated. See docs/architecture/websocket-architecture.md.
+   */
+  WS_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1_000).max(600_000).default(30_000),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
