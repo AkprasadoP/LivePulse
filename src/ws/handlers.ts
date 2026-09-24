@@ -1,52 +1,73 @@
-import type { PrismaClient } from "@prisma/client";
-import type { Session } from "@prisma/client";
 import type { Connection } from "./connection.js";
 import type { SessionRegistry } from "./session-registry.js";
 import { SessionRepository } from "../modules/sessions/session.repository.js";
-import { NotFoundError } from "../shared/errors.js";
+import { QuizRepository } from "../modules/quizzes/quiz.repository.js";
+import { AnswerRepository } from "../modules/answers/answer.repository.js";
+import { ParticipantRepository } from "../modules/participants/participant.repository.js";
+import { NotFoundError, InvalidStateTransitionError } from "../shared/errors.js";
+import { sessionJoinedMessage, sessionStateMessage } from "./protocol.js";
 import {
   clientEventSchemas,
-  clientEnvelopeSchema,
   errorMessage,
   isKnownClientEvent,
   protocolIssueDetails,
-  sessionJoinedMessage,
-  sessionStateMessage,
+  requiresParticipant,
+  type ErrorPayload,
   type ServerEnvelope,
 } from "./protocol.js";
+import {
+  handleQuizStart,
+  handleQuestionPublish,
+  handleQuestionClose,
+  handleQuizAnswer,
+} from "./quiz-handlers.js";
+
+export type HandlerLog = {
+  info: (obj: Record<string, unknown>, msg: string) => void;
+  warn: (obj: Record<string, unknown>, msg: string) => void;
+  error: (obj: Record<string, unknown>, msg: string) => void;
+};
 
 export interface HandlerDependencies {
   registry: SessionRegistry;
   sessionRepository: SessionRepository;
-  log: {
-    info: (obj: Record<string, unknown>, msg: string) => void;
-    warn: (obj: Record<string, unknown>, msg: string) => void;
-    error: (obj: Record<string, unknown>, msg: string) => void;
-  };
+  quizRepository: QuizRepository;
+  answerRepository: AnswerRepository;
+  participantRepository: ParticipantRepository;
+  log: HandlerLog;
 }
 
-/**
- * Serialize and send one envelope, or log if the socket died mid-flight.
- * Send failures never crash the process.
- */
-function send(
-  connection: Connection,
-  message: ServerEnvelope,
-  log: HandlerDependencies["log"],
-): void {
+/** Serialize and send one envelope; failures are logged, never thrown. */
+export function send(connection: Connection, message: ServerEnvelope, log: HandlerLog): void {
   if (connection.socket.readyState !== connection.socket.OPEN) return;
   connection.socket.send(JSON.stringify(message), (error) => {
     if (error) log.warn({ err: error.message }, "WebSocket send failed");
   });
 }
 
-function serializeSessionState(session: Session, sessionId: string | null) {
+export function serializeSessionState(session: {
+  id: string;
+  state: "CREATED" | "LIVE" | "ENDED";
+  startedAt: Date | null;
+  endedAt: Date | null;
+  updatedAt: Date;
+}) {
   return {
-    sessionId,
+    sessionId: session.id,
     state: session.state,
     startedAt: session.startedAt?.toISOString() ?? null,
     endedAt: session.endedAt?.toISOString() ?? null,
     updatedAt: session.updatedAt.toISOString(),
+  };
+}
+
+export function detachedStateSnapshot() {
+  return {
+    sessionId: null,
+    state: "ENDED" as const,
+    startedAt: null,
+    endedAt: null,
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -101,65 +122,163 @@ export async function handleClientEnvelope(
     return;
   }
 
-  try {
-    switch (type) {
-      case "session.join":
-        await handleSessionJoin(connection, payloadResult.data.sessionId, requestId, deps);
-        return;
-      case "session.leave":
-        handleSessionLeave(connection, requestId, deps);
-        return;
-    }
-  } catch (error) {
-    // Known, expected domain failures map to protocol errors...
-    if (error instanceof NotFoundError) {
+  // Guard: participant-bound events need a bound participant...
+  if (requiresParticipant(type)) {
+    if (connection.participantId === null) {
+      deps.log.warn({ eventType: type }, "WebSocket protocol error: participant required");
       send(
         connection,
         errorMessage(requestId, {
-          code: "SESSION_NOT_FOUND",
-          message: "Session does not exist",
+          code: "NOT_A_PARTICIPANT",
+          message: "Join with a participant identity before sending this event",
           details: null,
         }),
         deps.log,
       );
       return;
     }
-    // ...anything else is a genuine server fault: log full details internally,
-    // expose nothing (AGENT.md: explicit failure handling without leaking internals).
-    deps.log.error({ err: error, eventType: type, requestId }, "WebSocket handler internal error");
+    if (connection.joinedSessionId === null) {
+      send(
+        connection,
+        errorMessage(requestId, {
+          code: "NOT_JOINED",
+          message: "Join a session first",
+          details: null,
+        }),
+        deps.log,
+      );
+      return;
+    }
+  }
+  // ...and teacher events additionally need the TEACHER role.
+  const teacherEvents = ["quiz.start", "question.publish", "question.close"] as const;
+  if (
+    (teacherEvents as readonly string[]).includes(type) &&
+    connection.participantRole !== "TEACHER"
+  ) {
+    deps.log.warn({ eventType: type }, "WebSocket protocol error: teacher required");
     send(
       connection,
       errorMessage(requestId, {
-        code: "INTERNAL_ERROR",
-        message: "Internal server error",
+        code: "TEACHER_REQUIRED",
+        message: "This event requires a TEACHER participant",
         details: null,
       }),
       deps.log,
     );
+    return;
+  }
+
+  try {
+    // The dispatch table shares one payload type; each event's schema already
+    // validated its own payload, so the per-case cast is safe.
+    const payload = payloadResult.data as
+      | { sessionId: string; participant?: { displayName: string } }
+      | { quizId: string }
+      | { questionId: string }
+      | { questionId: string; content: string }
+      | Record<string, never>;
+    switch (type) {
+      case "session.join":
+        await handleSessionJoin(
+          connection,
+          payload as { sessionId: string; participant?: { displayName: string } },
+          requestId,
+          deps,
+        );
+        return;
+      case "session.leave":
+        handleSessionLeave(connection, requestId, deps);
+        return;
+      case "quiz.start":
+        await handleQuizStart(connection, payload as { quizId: string }, requestId, deps);
+        return;
+      case "question.publish":
+        await handleQuestionPublish(connection, payload as { questionId: string }, requestId, deps);
+        return;
+      case "question.close":
+        await handleQuestionClose(connection, payload as { questionId: string }, requestId, deps);
+        return;
+      case "quiz.answer":
+        await handleQuizAnswer(
+          connection,
+          payload as { questionId: string; content: string },
+          requestId,
+          deps,
+        );
+        return;
+    }
+  } catch (error) {
+    handleError(connection, error, requestId, type, deps);
   }
 }
 
+function protocolErrorFor(error: unknown): ErrorPayload | null {
+  if (error instanceof NotFoundError) {
+    const resource = error.resource.toLowerCase();
+    if (resource === "quiz") {
+      return { code: "QUIZ_NOT_FOUND", message: "Quiz does not exist", details: null };
+    }
+    if (resource === "question") {
+      return { code: "QUESTION_NOT_FOUND", message: "Question does not exist", details: null };
+    }
+    return { code: "SESSION_NOT_FOUND", message: "Session does not exist", details: null };
+  }
+  if (error instanceof InvalidStateTransitionError) {
+    return {
+      code: "INVALID_STATE_TRANSITION",
+      message: error.message,
+      details: null,
+    };
+  }
+  return null;
+}
+
+export function handleError(
+  connection: Connection,
+  error: unknown,
+  requestId: string,
+  eventType: string,
+  deps: HandlerDependencies,
+): void {
+  const mapped = protocolErrorFor(error);
+  if (mapped) {
+    send(connection, errorMessage(requestId, mapped), deps.log);
+    return;
+  }
+  // Genuine server fault: log fully server-side, expose nothing.
+  deps.log.error({ err: error, eventType, requestId }, "WebSocket handler internal error");
+  send(
+    connection,
+    errorMessage(requestId, {
+      code: "INTERNAL_ERROR",
+      message: "Internal server error",
+      details: null,
+    }),
+    deps.log,
+  );
+}
+
 // ---------------------------------------------------------------------------
-// Event handlers
+// session.join / session.leave
 // ---------------------------------------------------------------------------
 
 async function handleSessionJoin(
   connection: Connection,
-  sessionId: string,
+  payload: { sessionId: string; participant?: { displayName: string } },
   requestId: string,
   deps: HandlerDependencies,
 ): Promise<void> {
-  // PostgreSQL is the only source of session state: read, never mutate,
-  // never duplicate the state machine (AGENT.md Phase 2 constraint).
-  const session = await deps.sessionRepository.getById(sessionId);
+  // PostgreSQL is the only source of session state: read, never mutate the
+  // session state machine.
+  const session = await deps.sessionRepository.getById(payload.sessionId);
   if (!session) {
-    throw new NotFoundError("Session", sessionId);
+    throw new NotFoundError("Session", payload.sessionId);
   }
 
-  // Deterministic join-switch (ADR-003): joining another session while joined
-  // is leave(A) then join(B). Re-joining the SAME session is refused so a
-  // buggy client loop cannot spin the registry.
-  if (connection.joinedSessionId === sessionId) {
+  // Re-joining the SAME session is refused so a buggy client loop cannot
+  // spin the registry (ADR-003). Switching sessions remains leave-then-join.
+  if (connection.joinedSessionId === payload.sessionId) {
     send(
       connection,
       errorMessage(requestId, {
@@ -172,22 +291,48 @@ async function handleSessionJoin(
     return;
   }
 
-  const previousSessionId = deps.registry.joinSession(connection, sessionId);
+  // Identity seam (Phase 3): bind (or rebind) the participant atomically.
+  // A join without `participant` stays view-only (Phase 2 compatibility).
+  let participant: { id: string; role: "TEACHER" | "STUDENT"; displayName: string } | null = null;
+  if (payload.participant) {
+    deps.registry.leaveSession(connection);
+    const found = await deps.participantRepository.findOrCreate(
+      payload.sessionId,
+      payload.participant.displayName,
+    );
+    connection.participantId = found.participant.id;
+    connection.participantRole = found.participant.role;
+    connection.displayName = payload.participant.displayName;
+    participant = {
+      id: found.participant.id,
+      role: found.participant.role,
+      displayName: payload.participant.displayName,
+    };
+  } else {
+    deps.registry.leaveSession(connection);
+  }
+
+  const previousSessionId = deps.registry.joinSession(connection, payload.sessionId);
   if (previousSessionId) {
     deps.log.info({ previousSessionId }, "WebSocket session left (switch)");
   }
-  deps.log.info({ sessionId }, "WebSocket session joined");
+  deps.log.info(
+    { sessionId: payload.sessionId, participantId: participant?.id ?? null },
+    "WebSocket session joined",
+  );
 
   send(
     connection,
-    sessionJoinedMessage(requestId, { sessionId: session.id, state: session.state }),
+    sessionJoinedMessage(requestId, {
+      sessionId: session.id,
+      state: session.state,
+      participantId: participant?.id ?? null,
+      role: participant?.role ?? null,
+      displayName: participant?.displayName ?? null,
+    }),
     deps.log,
   );
-  send(
-    connection,
-    sessionStateMessage(requestId, serializeSessionState(session, session.id)),
-    deps.log,
-  );
+  send(connection, sessionStateMessage(requestId, serializeSessionState(session)), deps.log);
 }
 
 function handleSessionLeave(
@@ -200,19 +345,10 @@ function handleSessionLeave(
   if (previousSessionId) {
     deps.log.info({ sessionId: previousSessionId }, "WebSocket session left");
   }
+  // The participant binding is session-scoped: leaving detaches it too.
+  connection.participantId = null;
+  connection.participantRole = null;
+  connection.displayName = null;
 
-  // The authoritative snapshot the client should show after detaching: no
-  // session. Sending ENDED + sessionId:null (not a real session row) keeps
-  // the payload shape total — the null session id marks detachment.
-  send(
-    connection,
-    sessionStateMessage(requestId, {
-      sessionId: null,
-      state: "ENDED",
-      startedAt: null,
-      endedAt: null,
-      updatedAt: new Date().toISOString(),
-    }),
-    deps.log,
-  );
+  send(connection, sessionStateMessage(requestId, detachedStateSnapshot()), deps.log);
 }

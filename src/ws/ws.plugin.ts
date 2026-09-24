@@ -4,6 +4,10 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import { SessionRegistry } from "./session-registry.js";
 import { SessionRepository } from "../modules/sessions/session.repository.js";
+import { QuizRepository } from "../modules/quizzes/quiz.repository.js";
+import { AnswerRepository } from "../modules/answers/answer.repository.js";
+import { UserRepository } from "../modules/users/user.repository.js";
+import { ParticipantRepository } from "../modules/participants/participant.repository.js";
 import { handleClientEnvelope } from "./handlers.js";
 import {
   clientEnvelopeSchema,
@@ -54,6 +58,12 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   const { config, httpServer, app } = options;
   const registry = new SessionRegistry();
   const sessionRepository = new SessionRepository(app.prisma);
+  const quizRepository = new QuizRepository(app.prisma);
+  const answerRepository = new AnswerRepository(app.prisma);
+  const participantRepository = new ParticipantRepository(
+    app.prisma,
+    new UserRepository(app.prisma),
+  );
 
   const wss = new WebSocketServer({
     noServer: true, // we own the upgrade routing (single shared HTTP server)
@@ -221,7 +231,14 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       return;
     }
 
-    await handleClientEnvelope(connection, envelope.data, { registry, sessionRepository, log });
+    await handleClientEnvelope(connection, envelope.data, {
+      registry,
+      sessionRepository,
+      quizRepository,
+      answerRepository,
+      participantRepository,
+      log,
+    });
   }
 
   function safeSend(

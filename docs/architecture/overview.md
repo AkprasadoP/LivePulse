@@ -1,10 +1,11 @@
 # LivePulse — Architecture Overview
 
-> **Status: Phase 2 — Single WebSocket Server.** This document describes ONLY
-> what is actually implemented. Redis Pub/Sub, multiple WebSocket instances,
-> presence broadcasting, reconnect/recovery, doubt-queue semantics,
-> Prometheus/Grafana and Nginx are _not implemented_ and are listed as such.
-> Per AGENT.md: never document future-state as current-state.
+> **Status: Phase 3 — Live Quiz Execution + Concurrency (single instance).**
+> This document describes ONLY what is actually implemented. Redis Pub/Sub,
+> multiple WebSocket instances, presence broadcasting, reconnect/recovery,
+> doubt-queue semantics, Prometheus/Grafana and Nginx are _not implemented_
+> and are listed as such. Per AGENT.md: never document future-state as
+> current-state.
 
 ## 1. Current architecture (as implemented)
 
@@ -22,7 +23,11 @@ Fastify server (TypeScript, ESM)
    ├── GET  /quizzes/:quizId               → quiz + questions (answers hidden)
    ├── GET  /ws (plain HTTP)               → 426 Upgrade Required
    ├── WebSocket upgrade /ws               → raw `ws`, upgrade-routed on the SAME HTTP server
-   │     session.join / session.leave      → session.joined / session.state / error
+   │     session.join (+ optional participant identity seam) / session.leave
+   │     quiz.start / question.publish / question.close (TEACHER-guarded, WS-only)
+   │     quiz.answer → atomic persist + first-correct-wins election (ADR-004)
+   │     server events: quiz.started, question.published, question.closed,
+   │     answer.accepted, leaderboard.updated, session.joined/state, error
    │     Zod-validated envelopes, protocol error codes, requestId correlation
    │     heartbeat ping/pong (30s default) → dead-peer sweep
    │     in-memory SessionRegistry (sessionId → connections) — ephemeral, connection-keyed
@@ -35,8 +40,11 @@ Fastify server (TypeScript, ESM)
                     ▼
 PostgreSQL 17 (docker-compose, host 5433)  ← durable source of truth
   users · sessions · session_participants · quizzes · questions · answers · doubts
-  (migration 20260922090904_init_domain; constraints verified by integration tests)
-  The WebSocket layer READS session state; it never writes or duplicates it.
+  (migrations: 20260922090904_init_domain + 20260922191225_phase3_quiz_and_winner;
+  constraints verified by integration tests; two partial unique indexes enforce
+  one-winner-per-question and one-published-question-per-quiz)
+  The WS layer reads all state and writes exactly one thing: the atomic answer
+  election transaction. Session/quiz/question state machines are never duplicated.
 
 Redis 7 (docker-compose, host 6380): running but NOT used by the application yet.
 ```
@@ -46,31 +54,34 @@ second instance, no Redis usage** — those arrive in Phases 5–6.
 
 ## 2. Component inventory
 
-| Component                                              | Status | Notes                                                                           |
-| ------------------------------------------------------ | ------ | ------------------------------------------------------------------------------- |
-| TypeScript (strict) + Node ESM                         | ✅     |                                                                                 |
-| Fastify HTTP server + graceful shutdown                | ✅     | `src/app/app.ts`, `src/server.ts`                                               |
-| Health endpoint (liveness only)                        | ✅     | does NOT probe PG/Redis by design                                               |
-| Zod env configuration, fail-fast                       | ✅     | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`                                  |
-| Pino structured logging                                | ✅     | pretty transport in development                                                 |
-| Domain schema (7 entities, 5 enums)                    | ✅     | `prisma/schema.prisma`, ADR-002                                                 |
-| Migrations                                             | ✅     | `20260922090904_init_domain` applied to dev + test DBs                          |
-| Session state machine                                  | ✅     | `CREATED→LIVE→ENDED` (+`CREATED→ENDED`), atomic conditional UPDATE; race-tested |
-| Data-access layer                                      | ✅     | `SessionRepository`, `QuizRepository` — small, domain-specific                  |
-| HTTP API (sessions, quizzes)                           | ✅     | documented in `docs/api/http-api.md`                                            |
-| Zod request validation + UUID param guards             | ✅     | malformed IDs never reach the DB                                                |
-| WebSocket server (raw `ws`) on the shared HTTP server  | ✅     | `src/ws/`; upgrade routing, 64 KiB frame cap, 426 for plain HTTP `/ws`          |
-| WS protocol (envelope + Zod schemas + error codes)     | ✅     | documented in `docs/api/websocket-protocol.md`                                  |
-| `session.join` / `session.leave` / state push          | ✅     | reads session state from PostgreSQL; no participants created                    |
-| In-memory SessionRegistry (ephemeral)                  | ✅     | `sessionId → Set<Connection>`; connection-keyed, no dedup (by design)           |
-| Heartbeat liveness (ping/pong + sweep)                 | ✅     | one missed pong ⇒ terminate; default 30 s                                       |
-| WS integration tests over real sockets                 | ✅     | 25 tests: lifecycle, protocol, session behavior, heartbeat, shutdown            |
-| Integration tests vs real PostgreSQL                   | ✅     | 42 Phase 1 tests (API flows, DB constraints, concurrency)                       |
-| Quiz/question lifecycle transitions via API            | ❌     | modeled in schema, driven in Phase 3                                            |
-| Answer submission / first-correct-wins                 | ❌     | Phase 4 (winner election ADR pending)                                           |
-| WS: quiz events, presence, reconnect/recovery          | ❌     | Phases 3, 7                                                                     |
-| Redis client, Pub/Sub, presence, doubt queue semantics | ❌     | Phases 5–8                                                                      |
-| Nginx, multi-instance, Prometheus, Grafana, k6         | ❌     | deliberately deferred (§16, §18)                                                |
+| Component                                              | Status | Notes                                                                            |
+| ------------------------------------------------------ | ------ | -------------------------------------------------------------------------------- |
+| TypeScript (strict) + Node ESM                         | ✅     |                                                                                  |
+| Fastify HTTP server + graceful shutdown                | ✅     | `src/app/app.ts`, `src/server.ts`                                                |
+| Health endpoint (liveness only)                        | ✅     | does NOT probe PG/Redis by design                                                |
+| Zod env configuration, fail-fast                       | ✅     | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`                                   |
+| Pino structured logging                                | ✅     | pretty transport in development                                                  |
+| Domain schema (7 entities, 5 enums)                    | ✅     | `prisma/schema.prisma`, ADR-002                                                  |
+| Migrations                                             | ✅     | `20260922090904_init_domain` applied to dev + test DBs                           |
+| Session state machine                                  | ✅     | `CREATED→LIVE→ENDED` (+`CREATED→ENDED`), atomic conditional UPDATE; race-tested  |
+| Data-access layer                                      | ✅     | `SessionRepository`, `QuizRepository` — small, domain-specific                   |
+| HTTP API (sessions, quizzes)                           | ✅     | documented in `docs/api/http-api.md`                                             |
+| Zod request validation + UUID param guards             | ✅     | malformed IDs never reach the DB                                                 |
+| WebSocket server (raw `ws`) on the shared HTTP server  | ✅     | `src/ws/`; upgrade routing, 64 KiB frame cap, 426 for plain HTTP `/ws`           |
+| WS protocol (envelope + Zod schemas + error codes)     | ✅     | documented in `docs/api/websocket-protocol.md`                                   |
+| `session.join` / `session.leave` / state push          | ✅     | reads session state from PostgreSQL; no participants created                     |
+| In-memory SessionRegistry (ephemeral)                  | ✅     | `sessionId → Set<Connection>`; connection-keyed, no dedup (by design)            |
+| Heartbeat liveness (ping/pong + sweep)                 | ✅     | one missed pong ⇒ terminate; default 30 s                                        |
+| WS integration tests over real sockets                 | ✅     | 45 tests: lifecycle, protocol, session behavior, heartbeat, shutdown             |
+| Integration tests vs real PostgreSQL                   | ✅     | 83 total incl. WS (API flows, DB constraints, quiz flow, races)                  |
+| Quiz/question lifecycle transitions (WS, teacher)      | ✅     | `quiz.start` / `question.publish` / `question.close`; one-open-question DB index |
+| Identity seam (displayName → user + participant)       | ✅     | Phase 3, temporary until auth; unique displayName, race-safe find-or-create      |
+| Answer submission + first-correct-wins election        | ✅     | ADR-004: FOR NO KEY UPDATE + partial unique index; duplicates replay verdicts    |
+| Leaderboard (per question, derived from answers)       | ✅     | `leaderboard.updated` broadcasts; no ranking state cached                        |
+| Concurrency tests (10/50/100 + mixed races)            | ✅     | exactly one winner on every run — `docs/testing/concurrency.md`                  |
+| Presence broadcasting, reconnect/recovery              | ❌     | later phases (7)                                                                 |
+| Redis client, Pub/Sub, presence, doubt queue semantics | ❌     | Phases 5–8                                                                       |
+| Nginx, multi-instance, Prometheus, Grafana, k6         | ❌     | deliberately deferred (§16, §18)                                                 |
 
 ## 3. Repository layout (Phase 2 additions highlighted)
 
@@ -84,14 +95,18 @@ src/
 │   └── prisma/plugin.ts      PrismaClient from config; disconnect on close
 ├── modules/
 │   ├── sessions/…            repository, state machine, schemas, routes   (Phase 1)
-│   ├── quizzes/…             repository, schemas, serializer, routes     (Phase 1)
+│   ├── quizzes/…             repository, CAS state transitions, schemas   (Phases 1+3)
+│   ├── answers/…             AnswerRepository: atomic election transaction (Phase 3)
+│   ├── participants/…        ParticipantRepository: find-or-create seam   (Phase 3)
+│   ├── users/…               UserRepository: find-or-create by displayName (Phase 3)
 │   └── index.ts
-├── ws/                                                            (Phase 2)
+├── ws/                                                            (Phases 2+3)
 │   ├── ws.plugin.ts          attach(): upgrade routing, lifecycle, heartbeat, shutdown
 │   ├── protocol.ts           envelope + event Zod schemas, message factories
-│   ├── handlers.ts           session.join / session.leave handlers, error mapping
+│   ├── handlers.ts           session.join/leave, guards, error mapping, dispatch
+│   ├── quiz-handlers.ts      quiz.start/publish/close + quiz.answer + broadcasts (Phase 3)
 │   ├── session-registry.ts   sessionId → Set<Connection> (ephemeral)
-│   ├── connection.ts         per-socket state record
+│   ├── connection.ts         per-socket state record (+ participant binding, Phase 3)
 │   └── index.ts
 ├── shared/                   errors.ts (domain errors), types.ts
 └── server.ts                 entrypoint: .env → config → buildApp(listen) → signals
@@ -103,7 +118,7 @@ tests/
                               helpers: startListeningServer, WsTestClient, waitFor
 docs/
 ├── architecture/             overview.md, websocket-architecture.md
-├── decisions/                ADR-001 (foundation), ADR-002 (domain), ADR-003 (WS foundation)
+├── decisions/                ADR-001…004 (foundation, domain, WS foundation, first-correct-answer)
 ├── api/                      http-api.md, websocket-protocol.md
 ├── database/schema.md        entities, states, constraints, indexes
 └── testing/websocket-testing.md
@@ -114,22 +129,33 @@ load-tests/                   (empty until Phase 10)
 
 - **PostgreSQL is the only state store in use.** All durable domain data
   lives there with real constraints (unique memberships, unique question
-  positions, unique answer attempts, FK cascades/restricts, enum states) —
-  see `docs/database/schema.md`.
-- **WebSocket layer is read-only against PostgreSQL** (Phase 2 constraint):
-  it reads session state, never mutates it, never duplicates the state
-  machine, and stores nothing about connections in the database.
+  positions, unique answer attempts, unique winner per question, unique
+  displayName, FK cascades/restricts, enum states) — see
+  `docs/database/schema.md`.
+- **The WebSocket layer writes exactly one thing to PostgreSQL**: the atomic
+  answer submission + election transaction (ADR-004). Everything else is
+  read-only; state machines are never duplicated in memory.
+- **First-correct-answer is elected by the database**, not by application
+  sequencing: submissions serialize on the question row lock
+  (`FOR NO KEY UPDATE`); the winning INSERT is the election; the partial
+  unique index is defense-in-depth. "First" = lock order + commit, not send
+  time (ADR-004, protocol doc §7).
 - **Connection state is ephemeral and connection-keyed** (ADR-003): at most
   one session per connection; join-switch = leave-then-join; duplicate joins
-  refused; no client dedup (no identity exists).
+  refused; same-identity sockets are not deduplicated (no auth yet).
 - **Liveness is protocol-level ping/pong** with a one-interval grace, then
   terminate (ADR-003).
 - **Shutdown ordering:** Fastify `preClose` closes all sockets (1001) before
   `server.close()` — otherwise upgraded sockets deadlock the close (covered
   by a dedicated test).
 - **Identity:** global `users` vs session-scoped `session_participants`
-  (role on the participant). Creator auto-provisioned per approved decision;
-  replaced by JWT identity in the auth phase.
+  (role on the participant). Phase 3 development seam: `session.join` binds a
+  participant by unique displayName (find-or-create, race-safe); explicitly
+  temporary until JWT auth — the seam is one replaceable code path.
+- **REST vs WS split:** HTTP owns durable/curatorial control-plane operations
+  (create session/quiz, move session state); WS owns real-time classroom
+  events (quiz start, publish/close, answers, broadcasts) because their
+  effect _is_ propagation to every connected client.
 - **Session lifecycle is enforced, not implied:** transitions are atomic
   conditional updates; concurrent transitions are tested (exactly one
   winner). A DB trigger guard is documented as deferred defense-in-depth.
@@ -143,14 +169,14 @@ load-tests/                   (empty until Phase 10)
 
 ## 5. Deferred-by-design (not "missing")
 
-1. Quiz/question transitions + question publishing (Phase 3) — WS stays
-   join/state-only until then
-2. Answer submission + first-correct-wins election (Phase 4 ADR)
-3. Redis: presence, live doubt queue, Pub/Sub fan-out (Phases 5–8)
-4. Multi-instance + Nginx (Phase 6), reconnect/recovery protocol (Phase 7)
-5. WS backpressure tuning (measured in Phase 10, not guessed)
-6. Prometheus/Grafana `/metrics` (Phase 9), k6 load tests (Phase 10),
+1. Redis: presence, live doubt queue, Pub/Sub fan-out (Phases 5–8) — the
+   election deliberately stays in PostgreSQL so Redis need not own it
+2. Multi-instance + Nginx (Phase 6), reconnect/recovery protocol (Phase 7)
+3. WS backpressure tuning (measured in Phase 10, not guessed)
+4. Prometheus/Grafana `/metrics` (Phase 9), k6 load tests (Phase 10),
    failure drills (Phase 11)
+5. Quiz `ACTIVE → COMPLETED` transition (modeled; not exposed — questions
+   are the fine-grained surface for now)
 
 ## 6. How to run what exists today
 

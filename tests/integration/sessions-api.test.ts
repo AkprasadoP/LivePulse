@@ -43,7 +43,9 @@ describe("Sessions API (integration)", () => {
         name: "Biology 101",
       });
       expect(statusCode).toBe(201);
-      expect(body.session.creator.displayName).toBe("Teacher");
+      // Phase 3 identity seam: displayName is globally unique, so the default
+      // is a random "Teacher-xxxxxxxx" (collision-free), not a fixed name.
+      expect(body.session.creator.displayName).toMatch(/^Teacher-[0-9a-f]{8}$/);
     });
 
     it("persists the session and its teacher participant durably", async () => {

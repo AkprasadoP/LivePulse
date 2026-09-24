@@ -1,8 +1,9 @@
-# LivePulse — HTTP API (Phase 1 + Phase 2 additions)
+# LivePulse — HTTP API (Phase 1 + Phase 2/3 additions)
 
-Only the endpoints actually implemented are documented here. Authentication,
-answer submission and the doubt queue do not exist yet. The WebSocket
-surface is documented separately in `docs/api/websocket-protocol.md`.
+Only the endpoints actually implemented are documented here. Authentication
+and the doubt queue do not exist yet. Quiz/question lifecycle transitions
+and answer submission are **WebSocket-only** (Phase 3) — see
+`docs/api/websocket-protocol.md`.
 
 All responses are JSON. Errors use one consistent envelope:
 
@@ -58,7 +59,9 @@ participant (no authentication exists yet — approved Phase 1 decision).
 ```
 
 - `name`: string, 1–200 chars, required
-- `creator.displayName`: string, 1–100 chars, optional (defaults to `"Teacher"`)
+- `creator.displayName`: string, 1–100 chars, optional. Phase 3 identity
+  seam: `users.displayName` is globally unique, so the default is a random,
+  collision-free `Teacher-xxxxxxxx`, not a fixed name.
 
 **Response — 201**
 
@@ -173,7 +176,9 @@ Side effects: entering `LIVE` sets `startedAt`; entering `ENDED` sets
 Creates a quiz for an existing session, with optional inline questions
 (approved Phase 1 intake decision). Quiz and questions are written in one
 transaction; positions are assigned by array order starting at 1. Questions
-are created in `DRAFT` state (lifecycle transitions arrive in Phase 3).
+are created in `DRAFT` state — lifecycle transitions are WebSocket
+teacher events since Phase 3 (`quiz.start`, `question.publish`,
+`question.close`).
 
 **Request**
 
@@ -192,7 +197,8 @@ are created in `DRAFT` state (lifecycle transitions arrive in Phase 3).
 - `questions`: optional array (max 100); each item:
   - `prompt`: string, 1–2000 chars, required
   - `correctAnswer`: string, 1–2000 chars, optional (absent ⇒ ungraded)
-  - `firstCorrectWins`: boolean, optional, default `true` (Phase 4 semantics)
+  - `firstCorrectWins`: boolean, optional, default `true` (Phase 3 semantics —
+    drives winner election on `quiz.answer`)
 
 **Response — 201**
 
@@ -237,8 +243,11 @@ Returns the quiz with its questions ordered by `position`.
 
 ---
 
-## Not implemented in this phase (by design)
+## Not implemented (by design)
 
-Authentication/auth headers, joining (participants beyond the creator),
-answer submission, doubt endpoints, question publish/close transitions,
-leaderboards, presence. See `docs/architecture/overview.md` §5.
+Authentication/auth headers, joining via HTTP (participants bind over the
+WebSocket identity seam), doubt endpoints, presence. Quiz/question state
+transitions and answers are WS-only by design — real-time classroom events
+belong on the real-time channel; HTTP remains the control plane for
+durable/curatorial operations (create session/quiz, move session state).
+See `docs/architecture/overview.md` §5.

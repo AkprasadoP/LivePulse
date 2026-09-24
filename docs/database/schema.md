@@ -1,9 +1,10 @@
-# LivePulse — Domain Schema (Phase 1)
+# LivePulse — Domain Schema (Phase 1 + Phase 3)
 
-> Scope: the durable state model implemented in this phase. This document
+> Scope: the durable state model implemented through Phase 3. This document
 > describes what is actually in `prisma/schema.prisma` and applied by
-> migration `20260922090904_init_domain`. It is **not** immutable — later phases may
-> evolve it through new migrations. Redis-specific structures are
+> migrations `20260922090904_init_domain` and
+> `20260922191225_phase3_quiz_and_winner`. It is **not** immutable — later
+> phases may evolve it through new migrations. Redis-specific structures are
 > deliberately absent here; PostgreSQL is the durable source of truth only.
 
 ## 1. Identity model — User vs Participant
@@ -38,6 +39,12 @@ the session).
 | `answers`              | A participant's submission to a question | question + participant | immutable once written (append rows per attempt) |
 | `doubts`               | A raised question from a participant     | session + participant  | `OPEN → RESOLVED`                                |
 
+Phase 3 additions: quiz/question state machines are now **driven** (see
+§3), `users.displayName` is unique (identity seam), `answers.isWinner`
+exists with a partial unique index enforcing the one-winner invariant, and
+at most one question per quiz may be `PUBLISHED` at a time (partial unique
+index). See `docs/decisions/004` for the election design.
+
 ## 3. Lifecycle state machines
 
 ### Session — `SessionState`
@@ -61,27 +68,34 @@ CREATED ──start──▶ LIVE ──end──▶ ENDED
 - Timestamps: `startedAt` set when entering `LIVE`; `endedAt` when entering
   `ENDED`.
 
-### Quiz — `QuizState` (modeled, transitions not yet exposed in HTTP)
+### Quiz — `QuizState` (driven since Phase 3)
 
-`DRAFT → ACTIVE → COMPLETED`. Authored in `DRAFT`, running in `ACTIVE`,
-finished in `COMPLETED`. Teacher actions that drive these transitions are
-Phase 3.
+`DRAFT → ACTIVE → COMPLETED`. `quiz.start` (WebSocket, teacher) performs
+`DRAFT → ACTIVE` atomically (conditional update, zero rows ⇒
+`InvalidStateTransitionError`). `ACTIVE → COMPLETED` is **not exposed yet**
+— questions are the fine-grained control surface for now. Restarting an
+`ACTIVE` quiz is refused.
 
-### Question — `QuestionState` (modeled, transitions not yet exposed)
+### Question — `QuestionState` (driven since Phase 3)
 
-`DRAFT → PUBLISHED → CLOSED`. "Publish a question" (WebSocket push) is
-Phase 3; "close a question" stops answer acceptance. Rows are created in
-`DRAFT` (inline at quiz creation in this phase).
+`DRAFT → PUBLISHED → CLOSED`. `question.publish` (WebSocket, teacher, quiz
+must be `ACTIVE`) performs `DRAFT → PUBLISHED`; `question.close` performs
+`PUBLISHED → CLOSED`. While a question is `PUBLISHED` it accepts answers.
+**At most one question per quiz may be `PUBLISHED`** — enforced by the
+partial unique index `questions_one_published_per_quiz_key`
+(`(quizId) WHERE state = 'PUBLISHED'`), not by application checks. Closing
+twice or publishing a non-`DRAFT` question is
+`InvalidStateTransitionError`.
 
 ## 4. Fields and nullability
 
 ### users
 
-| Field         | Type         | Notes                                                       |
-| ------------- | ------------ | ----------------------------------------------------------- |
-| `id`          | UUID PK      | `uuidv7()` generated client-side (sortable IDs)             |
-| `displayName` | varchar(100) | non-null; no uniqueness (no auth yet — documented decision) |
-| `createdAt`   | timestamptz  | default now                                                 |
+| Field         | Type         | Notes                                                                                                                                                                  |
+| ------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`          | UUID PK      | `uuidv7()` generated client-side (sortable IDs)                                                                                                                        |
+| `displayName` | varchar(100) | non-null; **UNIQUE since Phase 3** (identity seam: stable find-or-create by name until authentication lands — documented in ADR-004's context and the WS protocol doc) |
+| `createdAt`   | timestamptz  | default now                                                                                                                                                            |
 
 ### sessions
 
@@ -132,22 +146,24 @@ Phase 3; "close a question" stops answer acceptance. Rows are created in
 
 ### answers
 
-| Field           | Type                        | Notes                                                                         |
-| --------------- | --------------------------- | ----------------------------------------------------------------------------- |
-| `id`            | UUID PK                     | uuidv7                                                                        |
-| `questionId`    | UUID → questions            | NOT NULL, **Cascade**                                                         |
-| `participantId` | UUID → session_participants | NOT NULL, **Cascade**                                                         |
-| `content`       | text                        | the submitted answer                                                          |
-| `attemptNumber` | int                         | default 1 — supports multiple attempts if enabled later                       |
-| `isCorrect`     | boolean                     | **nullable** — null means ungraded (question has no key, or not yet graded)   |
-| `submittedAt`   | timestamptz                 | default now                                                                   |
-| —               | —                           | **UNIQUE (questionId, participantId, attemptNumber)** — no duplicate attempts |
+| Field           | Type                        | Notes                                                                                                                            |
+| --------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `id`            | UUID PK                     | uuidv7                                                                                                                           |
+| `questionId`    | UUID → questions            | NOT NULL, **Cascade**                                                                                                            |
+| `participantId` | UUID → session_participants | NOT NULL, **Cascade**                                                                                                            |
+| `content`       | text                        | the submitted answer                                                                                                             |
+| `attemptNumber` | int                         | default 1 — supports multiple attempts if enabled later                                                                          |
+| `isCorrect`     | boolean                     | **nullable** — null means ungraded (question has no key)                                                                         |
+| `isWinner`      | boolean                     | default `false` (Phase 3). The winning INSERT **is** the election (ADR-004)                                                      |
+| `submittedAt`   | timestamptz                 | default now                                                                                                                      |
+| —               | —                           | **UNIQUE (questionId, participantId, attemptNumber)** — no duplicate attempts                                                    |
+| —               | —                           | **UNIQUE (questionId) WHERE isWinner** — partial index `answers_one_winner_per_question_key`: winner count ≤ 1 is a DB invariant |
 
-Deliberately **not** modeled: winner columns / `isWinner` flags. The
-"first correct answer wins" election is a concurrency problem for Phase 4
-(ADR to come: Redis `SET NX` vs PostgreSQL partial unique index). The
-current unique constraint on attempts is sufficient to persist every
-submission durably and unambiguously.
+Election semantics (ADR-004): every valid answer is persisted (correct,
+incorrect, ungraded); the first correct submission whose transaction commits
+under the question row lock inserts `isWinner = true`; duplicates replay the
+stored verdict idempotently; nothing about the election lives outside
+PostgreSQL.
 
 ### doubts
 
@@ -172,7 +188,9 @@ doubts and their resolution state.
 | ------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------------------- |
 | `quizzes.sessionId`                              | fetch all quizzes of a session                                   | session detail page / quiz list (frequent, Phase 3+) |
 | `questions.quizId`                               | fetch ordered questions of a quiz                                | quiz delivery + reconnection state rebuild           |
-| `answers.questionId_submittedAt_idx`             | submissions of a question in time order                          | leaderboard/timing queries (Phase 4)                 |
+| `answers.questionId_submittedAt_idx`             | submissions of a question in time order                          | leaderboard/timing queries (Phase 3 leaderboard)     |
+| `answers_one_winner_per_question_key` (partial)  | schema-level winner invariant                                    | defense-in-depth for the ADR-004 election            |
+| `questions_one_published_per_quiz_key` (partial) | schema-level single-open-question invariant                      | teacher publish flow (Phase 3)                       |
 | `answers.participantId`                          | a participant's answer history                                   | reconnect recovery: "what did I already answer?"     |
 | `doubts.sessionId_status_priority_createdAt_idx` | open doubts of a session ordered by priority DESC, createdAt ASC | teacher's queue view (Phase 8 ordering contract)     |
 | `doubts.participantId`                           | a participant's doubts                                           | moderation/history                                   |
@@ -180,7 +198,13 @@ doubts and their resolution state.
 
 Uniques also create implicit indexes: `(sessionId,userId)` on
 `session_participants`, `(quizId,position)` on `questions`,
-`(questionId,participantId,attemptNumber)` on `answers`.
+`(questionId,participantId,attemptNumber)` on `answers`, and
+`users.displayName` (Phase 3 identity seam).
+
+> Note: the two partial unique indexes above are hand-completed in the
+> migration SQL (`20260922191225_phase3_quiz_and_winner`) because Prisma
+> cannot express partial indexes in its DSL; `prisma migrate diff` reports
+> the drift harmlessly. Reason documented per the AGENT.md migration rule.
 
 ## 6. Referential actions summary
 

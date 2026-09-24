@@ -50,10 +50,14 @@ describe("clientEnvelopeSchema", () => {
 });
 
 describe("clientEventSchemas / dispatch", () => {
-  it("knows exactly the Phase 2 client events", () => {
+  it("knows exactly the current client events", () => {
     expect(isKnownClientEvent("session.join")).toBe(true);
     expect(isKnownClientEvent("session.leave")).toBe(true);
-    expect(isKnownClientEvent("quiz.answer")).toBe(false);
+    expect(isKnownClientEvent("quiz.start")).toBe(true);
+    expect(isKnownClientEvent("question.publish")).toBe(true);
+    expect(isKnownClientEvent("question.close")).toBe(true);
+    expect(isKnownClientEvent("quiz.answer")).toBe(true);
+    expect(isKnownClientEvent("doubt.create")).toBe(false); // Phase 8
     expect(isKnownClientEvent("SESSION.JOIN")).toBe(false); // case-sensitive
   });
 
@@ -71,11 +75,20 @@ describe("server message factories", () => {
     const message = sessionJoinedMessage("req-9", {
       sessionId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f",
       state: "LIVE",
+      participantId: null,
+      role: null,
+      displayName: null,
     });
     expect(message).toEqual({
       type: "session.joined",
       requestId: "req-9",
-      payload: { sessionId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f", state: "LIVE" },
+      payload: {
+        sessionId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f",
+        state: "LIVE",
+        participantId: null,
+        role: null,
+        displayName: null,
+      },
     });
   });
 

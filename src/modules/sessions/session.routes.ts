@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import { SessionRepository } from "./session.repository.js";
@@ -27,7 +28,9 @@ export async function sessionRoutes(
 
     const { session, creatorUser, teacherParticipant } = await sessions.createWithCreator({
       name: body.name,
-      creatorDisplayName: body.creator?.displayName ?? "Teacher",
+      // Unique globally (users.displayName) — suffix a short random tail to
+      // keep auto-provisioned creators collision-free (Phase 3 identity seam).
+      creatorDisplayName: body.creator?.displayName ?? `Teacher-${randomUUID().slice(0, 8)}`,
     });
 
     reply.code(201);

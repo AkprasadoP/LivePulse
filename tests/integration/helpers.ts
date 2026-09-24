@@ -39,6 +39,20 @@ export async function waitFor(
   throw new Error(`Condition not met within ${timeoutMs}ms`);
 }
 
+/** Async variant of waitFor for conditions that need database reads. */
+export async function waitForAsync(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 2_000,
+  stepMs = 25,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  throw new Error(`Condition not met within ${timeoutMs}ms`);
+}
+
 export interface IntegrationContext {
   app: FastifyInstance;
   prisma: PrismaClient;
@@ -153,9 +167,131 @@ export async function stopTestApp(): Promise<void> {
 /** Wipes all domain data between tests. Order is irrelevant thanks to CASCADE. */
 export async function resetDatabase(): Promise<void> {
   if (!current) throw new Error("startTestApp() must run before resetDatabase()");
-  await current.prisma.$executeRawUnsafe(
-    `TRUNCATE TABLE answers, doubts, questions, quizzes, session_participants, sessions, users RESTART IDENTITY CASCADE`,
+  // TRUNCATE takes ACCESS EXCLUSIVE locks on every table; a still-in-flight
+  // server transaction (e.g. an answer submission mid-election) can hold a
+  // conflicting lock, and Postgres resolves the resulting cycle by aborting
+  // the TRUNCATE with 40P01. Never a correctness signal — retry a few times.
+  const maxAttempts = 5;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await current.prisma.$executeRawUnsafe(
+        `TRUNCATE TABLE answers, doubts, questions, quizzes, session_participants, sessions, users RESTART IDENTITY CASCADE`,
+      );
+      return;
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? String((error as { code: unknown }).code)
+          : "";
+      if (code === "40P01" && attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 scenario helpers
+// ---------------------------------------------------------------------------
+
+let joinCounter = 0;
+
+export interface QuizScenario {
+  sessionId: string;
+  teacherDisplayName: string;
+  quizId: string;
+  questions: Array<{
+    id: string;
+    prompt: string;
+    correctAnswer: string | null;
+    firstCorrectWins: boolean;
+  }>;
+}
+
+/**
+ * Create a session (creator = TEACHER participant), a quiz with questions,
+ * and move the session to LIVE — ready for quiz.start over WS.
+ */
+export async function createLiveQuizScenario(
+  options: {
+    correctAnswer?: string | null;
+    firstCorrectWins?: boolean;
+    questionCount?: number;
+  } = {},
+): Promise<QuizScenario> {
+  if (!current) throw new Error("startListeningServer() must run first");
+  const { request } = current;
+  const correctAnswer = options.correctAnswer === undefined ? "42" : options.correctAnswer;
+  const questionCount = options.questionCount ?? 1;
+  // correctAnswer is optional (string), NOT nullable, in the Phase 1 API:
+  // an unkeyed question omits the field entirely.
+  const questionBody =
+    correctAnswer === null
+      ? { firstCorrectWins: options.firstCorrectWins ?? true }
+      : { correctAnswer, firstCorrectWins: options.firstCorrectWins ?? true };
+
+  const teacherDisplayName = `Teacher-${Math.random().toString(36).slice(2, 10)}`;
+  const created = await request("POST", "/sessions", {
+    name: `Scenario ${Date.now()}`,
+    creator: { displayName: teacherDisplayName },
+  });
+  if (created.statusCode !== 201) throw new Error(`session create failed: ${created.statusCode}`);
+  const sessionId = created.body.session.id as string;
+
+  const quizResponse = await request("POST", `/sessions/${sessionId}/quizzes`, {
+    title: "Race quiz",
+    questions: Array.from({ length: questionCount }, (_, i) => ({
+      prompt: `Question ${i + 1}: what is the answer?`,
+      ...questionBody,
+    })),
+  });
+  if (quizResponse.statusCode !== 201) {
+    throw new Error(`quiz create failed: ${quizResponse.statusCode}`);
+  }
+  const quiz = quizResponse.body.quiz;
+
+  const live = await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+  if (live.statusCode !== 200) throw new Error(`session start failed: ${live.statusCode}`);
+
+  return {
+    sessionId,
+    teacherDisplayName,
+    quizId: quiz.id,
+    questions: (quiz.questions as Array<Record<string, unknown>>).map((q) => ({
+      id: q.id as string,
+      prompt: q.prompt as string,
+      correctAnswer: (q.correctAnswer as string | null) ?? null,
+      firstCorrectWins: q.firstCorrectWins as boolean,
+    })),
+  };
+}
+
+/** Join a session over WS (optionally binding a participant) and await the ack. */
+export async function joinAs(
+  client: WsTestClient,
+  sessionId: string,
+  displayName?: string,
+): Promise<{ participantId: string | null; role: string | null; state: string }> {
+  const requestId = `join-${++joinCounter}`;
+  client.send({
+    type: "session.join",
+    requestId,
+    payload: {
+      sessionId,
+      ...(displayName === undefined ? {} : { participant: { displayName } }),
+    },
+  });
+  const joined = await client.waitFor(
+    (m) => m.type === "session.joined" && m.requestId === requestId,
   );
+  const payload = joined.payload as {
+    participantId: string | null;
+    role: string | null;
+    state: string;
+  };
+  return { participantId: payload.participantId, role: payload.role, state: payload.state };
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +363,11 @@ export class WsTestClient {
     });
   }
 
+  /** Collected frames minus any that an earlier waitFor() consumed. */
+  public drain(): ServerEnvelope[] {
+    return this.received.splice(0, this.received.length);
+  }
+
   public get isOpen(): boolean {
     return this.socket?.readyState === WebSocket.OPEN;
   }
@@ -238,6 +379,15 @@ export class WsTestClient {
       code: code as number,
       reason: typeof reason === "string" ? reason : Buffer.from(reason ?? []).toString(),
     }));
+  }
+
+  /** Abrupt transport teardown (no close handshake) — simulates a crash/mid-flight disconnect. */
+  public async destroy(): Promise<void> {
+    if (!this.socket) return;
+    const socket = this.socket;
+    this.socket = null;
+    socket.terminate();
+    await once(socket, "close").catch(() => {});
   }
 
   /** Graceful client-side close with code 1000; resolves on 'close'. */

@@ -40,11 +40,12 @@ enum DoubtStatus {
   RESOLVED
 }
 
-/// Global identity. No credentials yet (authentication is a later phase);
-/// displayName is intentionally NOT unique — documented in ADR-002.
+/// Global identity. No credentials yet (authentication is a later phase).
+/// displayName IS unique: the Phase 3 development identity seam resolves a
+/// connection to a stable user by name (see docs/decisions/002 + Phase 3 docs).
 model User {
   id        String   @id @default(uuid(7))
-  displayName String @db.VarChar(100)
+  displayName String @unique @db.VarChar(100)
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
   createdSessions       Session[]             @relation("SessionCreator")
@@ -141,8 +142,10 @@ model Question {
 
 /// A participant's submission. Append-style rows with attemptNumber support
 /// retry policies; UNIQUE (questionId, participantId, attemptNumber) makes
-/// duplicate attempts impossible at the database level. No winner columns:
-/// first-correct-wins election is a Phase 4 decision (see ADR-002).
+/// duplicate attempts impossible at the database level. isWinner is the
+/// first-correct-answer election result: enforced to at most one per question
+/// by a PARTIAL unique index (see docs/decisions/004 — index lives in the
+/// migration SQL because Prisma cannot express partial indexes).
 model Answer {
   id            String   @id @default(uuid(7))
   questionId    String
@@ -150,6 +153,7 @@ model Answer {
   content       String   @db.Text
   attemptNumber Int      @default(1)
   isCorrect     Boolean?
+  isWinner      Boolean  @default(false)
   submittedAt   DateTime @default(now()) @db.Timestamptz(6)
 
   question    Question           @relation(fields: [questionId], references: [id], onDelete: Cascade)

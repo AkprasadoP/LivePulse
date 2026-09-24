@@ -102,12 +102,13 @@ describe("WebSocket protocol validation (integration)", () => {
 
   it("rejects unknown event types with UNSUPPORTED_EVENT", async () => {
     const client = await connectWsClient();
-    client.send({ type: "quiz.answer", requestId: "r-unknown", payload: {} });
+    // doubt.create is reserved for Phase 8 and not yet a known event.
+    client.send({ type: "doubt.create", requestId: "r-unknown", payload: {} });
     const error = await client.waitFor((m) => m.type === "error");
     expect(error.requestId).toBe("r-unknown");
     expect(error.payload).toMatchObject({
       code: "UNSUPPORTED_EVENT",
-      message: expect.stringContaining("quiz.answer"),
+      message: expect.stringContaining("doubt.create"),
     });
     await client.close();
   });

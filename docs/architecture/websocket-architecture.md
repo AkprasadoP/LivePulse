@@ -1,8 +1,9 @@
-# WebSocket Architecture — Phase 2 (Single Instance)
+# WebSocket Architecture — Phase 2 + Phase 3 (Single Instance)
 
-> Scope: what is actually implemented in this phase. Redis Pub/Sub, multiple
-> WebSocket instances, presence broadcasting, and reconnect/recovery are
-> **future architecture** (AGENT.md Phases 5–7) and are marked as such.
+> Scope: what is actually implemented through Phase 3 (live quiz
+> execution). Redis Pub/Sub, multiple WebSocket instances, presence
+> broadcasting, and reconnect/recovery are **future architecture**
+> (AGENT.md Phases 5–7) and are marked as such.
 
 ## 1. Topology
 
@@ -19,9 +20,14 @@ There is exactly ONE application instance.
           │  HTTP routes    │  /health, /sessions, /quizzes, GET /ws (426)
           │       +         │
           │   WS server     │  upgrade routing on the SAME HTTP server
+          │                 │  Phase 3: session.join (identity seam), quiz.start,
+          │                 │  question.publish/close, quiz.answer + broadcasts
           └────────┬────────┘
                    │
-             PostgreSQL     (authoritative session state)
+             PostgreSQL     (authoritative state: sessions AND answers)
+                   ▲
+                   └── one new write path since Phase 3: answer submission
+                       (atomic election, ADR-004). Everything else is read-only.
 ```
 
 Key property: HTTP and WebSocket share Fastify's HTTP server. There is no
@@ -60,10 +66,15 @@ upgrade listener: path check
         'connection' event
              ↓
         Connection state created in the registry
-        { socket, joinedSessionId: null, isAlive: true, connectedAt }
+        { socket, joinedSessionId: null, isAlive: true, connectedAt,
+          participantId: null, participantRole: null, displayName: null }
              ↓
         message loop: JSON.parse → envelope Zod → event dispatch
              ↓        (per-message errors → protocol `error` frames)
+        Phase 3 dispatch: session.join may bind a participant; quiz.start /
+        question.publish / question.close (TEACHER-guarded) mutate quiz
+        state and broadcast; quiz.answer persists + elects (ADR-004) and
+        broadcasts verdict + leaderboard to the session registry
         heartbeat: ping every WS_HEARTBEAT_INTERVAL_MS, sweep dead peers
              ↓
         close (client- or server-initiated)
@@ -84,17 +95,19 @@ Failure handling rules:
 
 ## 4. Connection state vs session state vs durable state
 
-| Kind                   | Lives in                           | Survives restart? | Examples                                                   |
-| ---------------------- | ---------------------------------- | ----------------- | ---------------------------------------------------------- |
-| Connection state       | process memory (`SessionRegistry`) | **no**            | socket handle, `joinedSessionId`, `isAlive`, `connectedAt` |
-| Session state          | PostgreSQL (`sessions.state`)      | **yes**           | `CREATED / LIVE / ENDED`, timestamps                       |
-| Durable business state | PostgreSQL                         | **yes**           | participants, quizzes, questions, answers, doubts          |
+| Kind                   | Lives in                           | Survives restart? | Examples                                                                                                               |
+| ---------------------- | ---------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Connection state       | process memory (`SessionRegistry`) | **no**            | socket handle, `joinedSessionId`, `isAlive`, `connectedAt`, participant binding (`participantId`/`role`/`displayName`) |
+| Session state          | PostgreSQL (`sessions.state`)      | **yes**           | `CREATED / LIVE / ENDED`, timestamps                                                                                   |
+| Durable business state | PostgreSQL                         | **yes**           | participants, quizzes, questions, answers (incl. winner), doubts                                                       |
 
 The registry is deliberately ephemeral: it maps `sessionId → Set<Connection>`
 so the server can deliver frames to everyone watching a session. It holds **no
-business data**, is keyed by connection (no identity exists yet), and a
-restart simply means every client re-joins. PostgreSQL is never written by
-the WebSocket layer in this phase — it only reads sessions.
+business data**, is keyed by connection, and a restart simply means every
+client re-joins (a re-join re-binds the participant via the identity seam).
+PostgreSQL is written by the WebSocket layer in exactly one place — the
+answer submission transaction (ADR-004) — and read everywhere else; session,
+quiz and question state machines are never duplicated in memory.
 
 ## 5. Heartbeat design
 
@@ -122,33 +135,68 @@ application-level reconnect/recovery — that is Phase 7.
 - `session.join(A)` while already joined to A: `error`
   `SESSION_ALREADY_JOINED` (refused, no state change) so a buggy client loop
   cannot churn the registry.
-- `session.leave` detaches from the registry but keeps the socket open.
-- Connections are NOT deduplicated: two sockets from the same client are two
-  registry entries. Identity does not exist yet; deduplication without it
-  would be guesswork (deliberate, documented behavior).
+- `session.leave` detaches from the registry **and the participant binding**
+  (it is session-scoped) but keeps the socket open.
+- Connections are NOT deduplicated: two sockets that join with the same
+  displayName resolve to the SAME participant row but remain two independent
+  registry entries. Deduplication by _user_ is deferred until authentication
+  exists (deliberate, documented behavior).
+
+## 6a. Participant binding and broadcasts (Phase 3)
+
+**Identity seam.** `session.join` with
+`participant: { displayName }` resolves (find-or-create, race-safe via the
+`users.displayName` unique constraint) a global user and a
+`session_participants` row; the connection stores `{participantId, role,
+displayName}`. The role is `TEACHER` when the displayName equals the
+session creator's, else `STUDENT`. Joining without `participant` stays
+view-only. The seam is explicitly temporary — it is the only code the
+future JWT phase replaces.
+
+**Teacher + answer events.** `quiz.start`, `question.publish` and
+`question.close` are TEACHER-guarded, validate against PostgreSQL (session
+`LIVE`, quiz `ACTIVE`, legal transitions), mutate through the same
+repository conditional-update pattern as the session machine, and broadcast
+`quiz.started` / `question.published` / `question.closed` (+ leaderboard
+frames) to every connection in the session via the registry.
+`question.published` never contains `correctAnswer`.
+
+**Answer path.** `quiz.answer` is the one DB write: it runs the atomic
+election transaction (ADR-004) and then sends a targeted `answer.accepted`
+to the submitter plus `answer.accepted` + `leaderboard.updated`
+broadcasts. Duplicate submissions replay the stored verdict without
+re-broadcasting. Leaderboards are derived from answer rows at read time —
+no ranking state is cached anywhere.
 
 ## 7. Observability
 
 Structured Pino events, all at the connection/registry level — never payload
 contents, never connection strings or future credentials:
 
-| Event                       | Level | Fields                                            |
-| --------------------------- | ----- | ------------------------------------------------- |
-| connection opened           | info  | `remoteAddress`                                   |
-| session joined              | info  | `sessionId` (+ `previousSessionId` on switch)     |
-| session left                | info  | `sessionId`                                       |
-| connection closed           | info  | `code`, `reason`                                  |
-| protocol error              | warn  | event type / issue count / code (no raw payloads) |
-| heartbeat cleanup           | info  | `connectedAt` of the terminated connection        |
-| send failure / socket error | warn  | error message only                                |
-| unexpected handler fault    | error | full error object server-side                     |
+| Event                                               | Level | Fields                                            |
+| --------------------------------------------------- | ----- | ------------------------------------------------- |
+| connection opened                                   | info  | `remoteAddress`                                   |
+| session joined                                      | info  | `sessionId` (+ `previousSessionId` on switch)     |
+| session joined (participant)                        | info  | `sessionId`, `participantId`                      |
+| session left                                        | info  | `sessionId`                                       |
+| quiz started / question published / question closed | info  | `sessionId`, `quizId`, `questionId`               |
+| answer accepted (fresh)                             | info  | `sessionId`, `questionId`, `participantId`        |
+| duplicate answer replay                             | info  | `sessionId`, `questionId`, `participantId`        |
+| connection closed                                   | info  | `code`, `reason`                                  |
+| protocol error                                      | warn  | event type / issue count / code (no raw payloads) |
+| heartbeat cleanup                                   | info  | `connectedAt` of the terminated connection        |
+| send failure / socket error                         | warn  | error message only                                |
+| unexpected handler fault                            | error | full error object server-side                     |
 
 ## 8. What is deliberately NOT here (future architecture)
 
 - **Redis Pub/Sub / multi-instance fan-out** — Phase 5–6. This registry is
-  process-local; a second instance would not see its sessions.
-- **Presence broadcasting** — Phase 3+. The registry already knows who is
-  connected; announcing it to everyone is a later, deliberate step.
+  process-local; a second instance would not see its sessions. (The answer
+  election was deliberately placed in PostgreSQL so this phase does not
+  need to move it — ADR-004.)
+- **Presence broadcasting** — later phase. The registry knows who is
+  connected (and now who the participants are); announcing it to everyone is
+  a later, deliberate step.
 - **Reconnect/recovery** — Phase 7. A dropped socket loses nothing durable
   (nothing was written), but there is no resume/session-replay protocol yet.
 - **Backpressure strategy** — `ws` buffers sends; at Phase 10 (load testing)

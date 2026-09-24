@@ -40,16 +40,45 @@ export type ClientEnvelope = z.infer<typeof clientEnvelopeSchema>;
 
 export const sessionJoinSchema = z.strictObject({
   sessionId: z.uuid(),
+  /**
+   * Development identity seam (Phase 3): the participant to bind to this
+   * connection. NOT authentication — displayName is the temporary
+   * credential; see docs/decisions/002 and the protocol doc identity section.
+   */
+  participant: z
+    .strictObject({
+      displayName: z.string().min(1).max(100),
+    })
+    .optional(),
 });
 
 export const sessionLeaveSchema = z.strictObject({});
 
-export type SessionJoinPayload = z.infer<typeof sessionJoinSchema>;
+export const quizStartSchema = z.strictObject({
+  quizId: z.uuid(),
+});
+
+export const questionPublishSchema = z.strictObject({
+  questionId: z.uuid(),
+});
+
+export const questionCloseSchema = z.strictObject({
+  questionId: z.uuid(),
+});
+
+export const quizAnswerSchema = z.strictObject({
+  questionId: z.uuid(),
+  content: z.string().min(1).max(2_000),
+});
 
 /** Client event name -> its payload schema. The dispatch table for handlers. */
 export const clientEventSchemas = {
   "session.join": sessionJoinSchema,
   "session.leave": sessionLeaveSchema,
+  "quiz.start": quizStartSchema,
+  "question.publish": questionPublishSchema,
+  "question.close": questionCloseSchema,
+  "quiz.answer": quizAnswerSchema,
 } as const;
 
 export type ClientEventType = keyof typeof clientEventSchemas;
@@ -59,6 +88,18 @@ export function isKnownClientEvent(type: string): type is ClientEventType {
   return type in clientEventSchemas;
 }
 
+/** Events that require a bound participant (anything but bare join/leave). */
+const PARTICIPANT_REQUIRED_EVENTS: ReadonlySet<ClientEventType> = new Set([
+  "quiz.start",
+  "question.publish",
+  "question.close",
+  "quiz.answer",
+]);
+
+export function requiresParticipant(type: ClientEventType): boolean {
+  return PARTICIPANT_REQUIRED_EVENTS.has(type);
+}
+
 // ---------------------------------------------------------------------------
 // Server events
 // ---------------------------------------------------------------------------
@@ -66,8 +107,11 @@ export function isKnownClientEvent(type: string): type is ClientEventType {
 export const sessionJoinedPayloadSchema = z.object({
   sessionId: z.uuid(),
   state: z.enum(["CREATED", "LIVE", "ENDED"]),
+  /** Null for view-only joins (no participant in the join payload). */
+  participantId: z.uuid().nullable(),
+  role: z.enum(["TEACHER", "STUDENT"]).nullable(),
+  displayName: z.string().nullable(),
 });
-export type SessionJoinedPayload = z.infer<typeof sessionJoinedPayloadSchema>;
 
 export const sessionStatePayloadSchema = z.object({
   /** The session the connection is now associated with, or null when detached. */
@@ -77,7 +121,59 @@ export const sessionStatePayloadSchema = z.object({
   endedAt: z.string().datetime().nullable(),
   updatedAt: z.string().datetime(),
 });
-export type SessionStatePayload = z.infer<typeof sessionStatePayloadSchema>;
+
+export const quizStartedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  quizId: z.uuid(),
+  state: z.enum(["DRAFT", "ACTIVE", "COMPLETED"]),
+});
+
+export const questionPublishedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  quizId: z.uuid(),
+  questionId: z.uuid(),
+  position: z.number().int(),
+  prompt: z.string(),
+  /** Absent from student-visible payloads; always null over the wire. */
+  firstCorrectWins: z.boolean(),
+  acceptingAnswers: z.literal(true),
+});
+
+export const questionClosedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  quizId: z.uuid(),
+  questionId: z.uuid(),
+});
+
+export const answerAcceptedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  questionId: z.uuid(),
+  participantId: z.uuid(),
+  displayName: z.string(),
+  isCorrect: z.boolean().nullable(),
+  isWinner: z.boolean(),
+  attemptNumber: z.number().int(),
+});
+
+export const answerRejectedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  questionId: z.uuid(),
+  participantId: z.uuid(),
+  reason: z.enum(["not_accepting_answers", "not_a_participant"]),
+});
+
+export const leaderboardEntrySchema = z.object({
+  participantId: z.uuid(),
+  displayName: z.string(),
+  correctCount: z.number().int(),
+  isWinner: z.boolean(),
+});
+
+export const leaderboardUpdatedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  questionId: z.uuid(),
+  standings: z.array(leaderboardEntrySchema),
+});
 
 export const errorPayloadSchema = z.object({
   code: z.enum([
@@ -87,6 +183,15 @@ export const errorPayloadSchema = z.object({
     "SESSION_NOT_FOUND",
     "SESSION_ALREADY_JOINED",
     "UNSUPPORTED_EVENT",
+    "NOT_JOINED",
+    "NOT_A_PARTICIPANT",
+    "TEACHER_REQUIRED",
+    "SESSION_NOT_LIVE",
+    "QUIZ_NOT_FOUND",
+    "QUESTION_NOT_FOUND",
+    "QUIZ_NOT_ACTIVE",
+    "QUESTION_NOT_ACCEPTING_ANSWERS",
+    "INVALID_STATE_TRANSITION",
     "INTERNAL_ERROR",
   ]),
   message: z.string(),
@@ -105,22 +210,61 @@ export type ErrorPayload = z.infer<typeof errorPayloadSchema>;
 
 export function sessionJoinedMessage(
   requestId: string,
-  payload: SessionJoinedPayload,
-): ServerEnvelope<SessionJoinedPayload> {
+  payload: z.infer<typeof sessionJoinedPayloadSchema>,
+): ServerEnvelope {
   return { type: "session.joined", requestId, payload };
 }
 
 export function sessionStateMessage(
   requestId: string | null,
-  payload: SessionStatePayload,
-): ServerEnvelope<SessionStatePayload> {
+  payload: z.infer<typeof sessionStatePayloadSchema>,
+): ServerEnvelope {
   return { type: "session.state", requestId, payload };
 }
 
-export function errorMessage(
+export function quizStartedMessage(
+  requestId: string,
+  payload: z.infer<typeof quizStartedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "quiz.started", requestId, payload };
+}
+
+export function questionPublishedMessage(
   requestId: string | null,
-  payload: ErrorPayload,
-): ServerEnvelope<ErrorPayload> {
+  payload: z.infer<typeof questionPublishedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "question.published", requestId, payload };
+}
+
+export function questionClosedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof questionClosedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "question.closed", requestId, payload };
+}
+
+export function answerAcceptedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof answerAcceptedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "answer.accepted", requestId, payload };
+}
+
+export function answerRejectedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof answerRejectedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "answer.rejected", requestId, payload };
+}
+
+export function leaderboardUpdatedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof leaderboardUpdatedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "leaderboard.updated", requestId, payload };
+}
+
+export function errorMessage(requestId: string | null, payload: ErrorPayload): ServerEnvelope {
   return { type: "error", requestId, payload };
 }
 

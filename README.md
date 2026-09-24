@@ -12,35 +12,43 @@ WS protocol: `docs/api/websocket-protocol.md` · Schema:
 
 ## Current implementation status
 
-**Phase 2 — Single WebSocket Server** (complete; Phase 1 retained beneath it):
+**Phase 3 — Live Quiz Execution + Concurrency** (complete; Phases 1–2
+retained beneath it):
 
-- Everything from Phase 1: typed Fastify HTTP server, fail-fast Zod config,
-  Pino logging, graceful shutdown, liveness-only `/health`, the 7-entity
-  PostgreSQL domain schema with real constraints, the race-safe session
-  state machine, and the session/quiz REST API
-- A WebSocket server on raw `ws`, sharing Fastify's HTTP server (one port,
-  one process): upgrade routing at `/ws`, 426 for plain HTTP, 64 KiB frame
-  cap, unknown upgrade paths destroyed before handshake
-- An explicit JSON envelope protocol (validated with Zod): `session.join`
-  and `session.leave` client events; `session.joined`, `session.state` and
-  a uniform `error` envelope from the server, with `requestId` correlation
-- An ephemeral in-memory session registry (connection-keyed, at most one
-  session per connection, deterministic leave-then-join switching)
-- Heartbeat liveness: server ping/pong every 30 s (configurable), one missed
-  pong terminates the connection
-- Graceful shutdown closes WebSockets with 1001 before the HTTP server
-  stops (Fastify `preClose`)
-- Vitest suites: 33 unit tests + 67 integration tests against real
-  PostgreSQL and real WebSocket clients (lifecycle, protocol validation,
-  session behavior, heartbeat sweep, shutdown)
+- Everything from Phases 1–2: typed Fastify HTTP server, fail-fast Zod
+  config, Pino logging, graceful shutdown, liveness-only `/health`, the
+  7-entity PostgreSQL domain schema, the race-safe session state machine,
+  the session/quiz REST API, and the raw-`ws` WebSocket layer (shared port,
+  envelope protocol, ephemeral registry, heartbeat, `preClose` shutdown)
+- A temporary development identity seam: `session.join` binds a real user +
+  `session_participants` row by globally-unique `displayName`
+  (find-or-create, race-safe); view-only joins still supported. Replaced by
+  authentication in a later phase — the seam is one replaceable code path
+- Quiz/question lifecycles driven over WebSocket (teacher-only):
+  `quiz.start` (DRAFT→ACTIVE), `question.publish` (DRAFT→PUBLISHED),
+  `question.close` (PUBLISHED→CLOSED), with broadcasts; at most one
+  published question per quiz enforced by a partial unique index
+- Answer submission (`quiz.answer`): server-side grading, atomic
+  persist + first-correct-wins election — submissions serialize on a
+  question row lock, the winning INSERT is the election, and a partial
+  unique index makes winner-count-≤-1 a database invariant (ADR-004).
+  Duplicates are idempotent verdict replays; the client is never told the
+  correct answer
+- Per-question leaderboard derived from answer rows, broadcast as
+  `leaderboard.updated` (no ranking state cached anywhere)
+- Concurrency verified with real-socket race tests: 10, 50 and 100
+  simultaneous correct answers (the 100 race repeated 3×) and a mixed
+  correct/incorrect run — exactly one winner on every run
+  (`docs/testing/concurrency.md`)
+- Vitest suites: 49 unit tests + 83 integration tests against real
+  PostgreSQL and real WebSocket clients
 
-**Not implemented yet** (by design, in phase order): quiz/question
-publishing over WS, answer submission and first-correct-wins election, Redis
-integration, presence broadcasting, doubt queue semantics, multi-instance
-deployment, reconnect recovery, Prometheus/Grafana, k6 load testing. Do not
-assume any of this exists.
+**Not implemented yet** (by design, in phase order): Redis integration
+(pub/sub, presence, doubt queue), multi-instance deployment, reconnect
+recovery, Prometheus/Grafana, k6 load testing. Do not assume any of this
+exists.
 
-## Stack (as of Phase 2)
+## Stack (as of Phase 3)
 
 TypeScript (strict, ESM) · Node.js ≥ 22 · Fastify 5 · `ws` 8 · Prisma +
 PostgreSQL 17 · Zod · Pino · Vitest · Docker Compose (PostgreSQL + Redis).
@@ -99,5 +107,6 @@ curl -s http://localhost:3000/ws
 - `docs/api/websocket-protocol.md` — envelope, events, error codes, limits
 - `docs/database/schema.md` — entities, lifecycles, constraints, indexes
 - `docs/testing/websocket-testing.md` — how the WS layer is tested
-- `docs/decisions/` — architecture decision records (ADR-001–003)
+- `docs/testing/concurrency.md` — how the one-winner race is demonstrated
+- `docs/decisions/` — architecture decision records (ADR-001–004)
 - `AGENT.md` — engineering principles, phase plan, honesty rules
