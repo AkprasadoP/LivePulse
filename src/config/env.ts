@@ -56,6 +56,22 @@ export const envSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
+  /**
+   * Phase 7 presence: cadence at which each instance re-publishes its local
+   * presence digest. Redis Pub/Sub is at-most-once, so the digest is how a
+   * missed `presence.update` (and a crashed peer) is reconciled. A remote
+   * instance is considered dead — and its contribution dropped — after
+   * 3 × this interval. Min 50 ms so tests can use a small, deterministic value.
+   */
+  PRESENCE_DIGEST_INTERVAL_MS: z.coerce.number().int().min(50).max(600_000).default(10_000),
+  /**
+   * Phase 7 observability: whether GET /metrics is registered. Unauthenticated
+   * by design (ops/dev endpoint; auth arrives in a later phase). Default on.
+   */
+  METRICS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

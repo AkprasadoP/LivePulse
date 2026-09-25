@@ -137,7 +137,17 @@ export interface IndependentInstance {
  */
 export async function startIndependentInstance(
   instanceId: string,
-  overrides: { distributionEnabled?: boolean } = {},
+  overrides: {
+    distributionEnabled?: boolean;
+    /** Phase 7: cadence of the presence digest (staleness = 3 × this). */
+    presenceDigestIntervalMs?: number;
+    /** Phase 7: disable GET /metrics entirely (route then answers 404). */
+    metricsEnabled?: boolean;
+    /** Phase 7: heartbeat cadence for presence-removal-on-sweep tests. */
+    wsHeartbeatIntervalMs?: number;
+    /** Test seam: capture structured log lines instead of discarding them. */
+    logStream?: NodeJS.WritableStream;
+  } = {},
 ): Promise<IndependentInstance> {
   const config = loadConfig({
     NODE_ENV: "test",
@@ -146,8 +156,22 @@ export async function startIndependentInstance(
     PORT: "0",
     INSTANCE_ID: instanceId,
     DISTRIBUTION_ENABLED: (overrides.distributionEnabled ?? true) ? "true" : "false",
+    // Conditional spread: exactOptionalPropertyTypes forbids explicit undefined.
+    ...(overrides.presenceDigestIntervalMs === undefined
+      ? {}
+      : { PRESENCE_DIGEST_INTERVAL_MS: String(overrides.presenceDigestIntervalMs) }),
+    ...(overrides.metricsEnabled === undefined
+      ? {}
+      : { METRICS_ENABLED: overrides.metricsEnabled ? "true" : "false" }),
+    ...(overrides.wsHeartbeatIntervalMs === undefined
+      ? {}
+      : { WS_HEARTBEAT_INTERVAL_MS: String(overrides.wsHeartbeatIntervalMs) }),
   });
-  const app = await buildApp({ config, listen: true });
+  const app = await buildApp({
+    config,
+    listen: true,
+    ...(overrides.logStream === undefined ? {} : { logStream: overrides.logStream }),
+  });
   const address = app.server.address();
   if (address === null || typeof address === "string") {
     throw new Error("Expected the instance to listen on a TCP port");
@@ -162,6 +186,39 @@ export async function startIndependentInstance(
     distributionReady: Promise.resolve(),
     close: () => app.close(),
   };
+}
+
+/**
+ * Phase 7 presence helper: wait for the next `presence.snapshot` for a session
+ * whose participant set satisfies the predicate. Errors after the timeout, so
+ * a missing snapshot is a test failure rather than a silent pass.
+ */
+export async function waitForPresence(
+  client: WsTestClient,
+  sessionId: string,
+  predicate: (participantIds: string[]) => boolean,
+  timeoutMs = 5_000,
+): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  let last: string[] = [];
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error(
+        `No matching presence.snapshot within ${timeoutMs}ms (last seen: ${JSON.stringify(last)})`,
+      );
+    }
+    const message = await client.waitFor(
+      (m) =>
+        m.type === "presence.snapshot" &&
+        (m.payload as { sessionId?: string }).sessionId === sessionId,
+      remaining,
+    );
+    last = (
+      (message.payload as { participants: Array<{ participantId: string }> }).participants ?? []
+    ).map((p) => p.participantId);
+    if (predicate(last)) return last;
+  }
 }
 
 /** WsTestClient connected to a SPECIFIC instance (not the shared `current`). */
@@ -456,6 +513,20 @@ export class WsTestClient {
       code: code as number,
       reason: typeof reason === "string" ? reason : Buffer.from(reason ?? []).toString(),
     }));
+  }
+
+  /**
+   * Freeze the transport: stop reading, so server pings are never answered.
+   * This is what a hung/frozen client looks like — the heartbeat sweep kills
+   * it without any cooperative close. Pair with resume() to revive.
+   */
+  public freeze(): void {
+    this.socket?.pause();
+  }
+
+  /** Undo freeze(). */
+  public resume(): void {
+    this.socket?.resume();
   }
 
   /** Abrupt transport teardown (no close handshake) — simulates a crash/mid-flight disconnect. */

@@ -4,7 +4,9 @@ import { ZodError } from "zod";
 import { Prisma } from "@prisma/client";
 import type { AppConfig } from "../config/index.js";
 import { prismaPlugin } from "../infrastructure/prisma/index.js";
+import { createMetrics, type Metrics } from "../infrastructure/metrics/index.js";
 import { healthRoutes } from "./routes/health.js";
+import { metricsRoutes } from "./routes/metrics.js";
 import { sessionRoutes } from "../modules/sessions/session.routes.js";
 import { quizRoutes } from "../modules/quizzes/quiz.routes.js";
 import { NotFoundError, InvalidStateTransitionError } from "../shared/errors.js";
@@ -14,6 +16,8 @@ declare module "fastify" {
   interface FastifyInstance {
     /** Present (non-null) only when the app was built with listen: true. */
     wsLayer: WebSocketLayer | null;
+    /** Phase 7 per-instance Prometheus registry; null when METRICS_ENABLED=false. */
+    metrics: Metrics | null;
   }
 }
 
@@ -25,6 +29,12 @@ export interface BuildAppOptions {
    * inject() over HTTP and explicit WS suites pass listen: true.
    */
   listen?: boolean;
+  /**
+   * Test seam (Phase 7): capture Pino's structured output into a stream so
+   * suites can assert on what is (and is NOT) logged. When absent, the usual
+   * environment-driven logger configuration applies (off under NODE_ENV=test).
+   */
+  logStream?: NodeJS.WritableStream | undefined;
 }
 
 /**
@@ -37,18 +47,27 @@ export interface BuildAppOptions {
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
   const { config } = options;
 
+  const logStream = options.logStream;
   const app = Fastify({
     logger:
-      config.NODE_ENV === "test"
+      logStream !== undefined
+        ? { level: config.LOG_LEVEL, stream: logStream, base: { instanceId: config.INSTANCE_ID } }
+        : config.NODE_ENV === "test"
         ? false // keep test output clean; assertions use the HTTP responses
         : config.NODE_ENV === "development"
           ? {
               level: config.LOG_LEVEL,
+              // Log correlation (ADR-009): every line carries the logical
+              // instance id so multi-instance logs can be attributed.
+              base: { instanceId: config.INSTANCE_ID },
               // Human-friendly logs locally; production keeps single-line JSON.
               transport: { target: "pino-pretty" },
             }
-          : { level: config.LOG_LEVEL },
+          : { level: config.LOG_LEVEL, base: { instanceId: config.INSTANCE_ID } },
   });
+
+  // One process-local registry per instance (never shared, never in Redis/PG).
+  app.decorate("metrics", config.METRICS_ENABLED ? createMetrics() : null);
 
   // Helpful HTTP errors (httpErrors.notFound(), 4xx/5xx constructors) for later phases.
   await app.register(sensible);
@@ -126,6 +145,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   });
 
   await app.register(healthRoutes);
+  await app.register(metricsRoutes, { metrics: app.metrics });
   await app.register(sessionRoutes, { prisma: app.prisma });
   await app.register(quizRoutes, { prisma: app.prisma });
 

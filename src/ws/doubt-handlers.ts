@@ -1,13 +1,12 @@
 import type { Connection } from "./connection.js";
 import type { HandlerDependencies } from "./handlers.js";
-import { send, broadcast } from "./handlers.js";
+import { send, broadcast, sendProtocolError } from "./handlers.js";
 import { NotFoundError } from "../shared/errors.js";
 import {
   doubtCreatedMessage,
   doubtResolvedMessage,
   doubtDismissedMessage,
   doubtQueueUpdatedMessage,
-  errorMessage,
   type DoubtView,
 } from "./protocol.js";
 import type { Doubt } from "@prisma/client";
@@ -54,30 +53,39 @@ export async function handleDoubtCreate(
   const participantId = connection.participantId;
   if (sessionId === null || participantId === null) return;
 
+  const createStarted = performance.now();
   const result = await deps.doubtRepository.create({
     sessionId,
     participantId,
     content: payload.content,
     clientDoubtId: payload.clientDoubtId,
   });
+  deps.log.metrics?.doubtOperationDuration.observe(
+    { operation: "create" },
+    (performance.now() - createStarted) / 1000,
+  );
 
   if (result.outcome === "session_not_found") {
     throw new NotFoundError("Session", sessionId);
   }
   if (result.outcome === "not_live") {
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "SESSION_NOT_LIVE",
         message: "Raise doubts while the session is LIVE",
         details: null,
-      }),
+      },
       deps.log,
     );
     return;
   }
 
   const view = toDoubtView(result.doubt, connection.displayName ?? "");
+  deps.log.metrics?.doubtCreated.inc({
+    result: result.outcome === "duplicate" ? "duplicate" : "created",
+  });
 
   // Idempotent retry: re-send the stored doubt privately and do NOT broadcast.
   // A retry is not a second enqueue (same as the Phase 3 answer replay).
@@ -142,21 +150,29 @@ async function transitionDoubt(
     throw new NotFoundError("Doubt", doubtId);
   }
 
+  const transitionStarted = performance.now();
   const updated = await deps.doubtRepository.transitionStatus(doubtId, sessionId, to);
+  deps.log.metrics?.doubtOperationDuration.observe(
+    { operation: to === "RESOLVED" ? "resolve" : "dismiss" },
+    (performance.now() - transitionStarted) / 1000,
+  );
   if (!updated) {
     // Lost the race (already RESOLVED/DISMISSED) — or it was completed
     // concurrently. Exactly one transition can succeed by construction.
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "DOUBT_NOT_OPEN",
         message: "Doubt is no longer open",
         details: null,
-      }),
+      },
       deps.log,
     );
     return;
   }
+
+  deps.log.metrics?.doubtTransitions.inc({ status: to });
 
   const resolvedAt = (updated.resolvedAt ?? new Date()).toISOString();
   deps.log.info({ sessionId, doubtId, status: to }, "WebSocket doubt transitioned");

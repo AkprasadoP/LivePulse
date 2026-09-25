@@ -12,8 +12,8 @@ WS protocol: `docs/api/websocket-protocol.md` · Schema:
 
 ## Current implementation status
 
-**Phase 6 — Doubt Queue (PostgreSQL-enforced ordering)** (complete; Phases 1–5
-retained beneath it):
+**Phase 7 — Presence + Observability** (complete; Phases 1–6 retained beneath
+it):
 
 - Everything from Phases 1–2: typed Fastify HTTP server, fail-fast Zod
   config, Pino logging, graceful shutdown, liveness-only `/health`, the
@@ -40,7 +40,7 @@ retained beneath it):
   simultaneous correct answers (the 100 race repeated 3×) and a mixed
   correct/incorrect run — exactly one winner on every run
   (`docs/testing/concurrency.md`)
-- Vitest suites: 55 unit tests + 117 integration tests against real
+- Vitest suites: 72 unit tests + 141 integration tests against real
   PostgreSQL, real Redis and real WebSocket clients
 - **Phase 4 — distributed WebSockets (implemented)**: inter-instance event
   distribution over Redis Pub/Sub, strictly as post-commit event notices on a
@@ -81,18 +81,52 @@ retained beneath it):
   1..100), resolve/dismiss races, idempotent retries and cross-session
   authorization (`tests/integration/doubt-queue.test.ts`). See
   `docs/architecture/doubt-queue.md`, `docs/testing/doubt-queue.md` and ADR-007
+- **Phase 7 — presence (implemented)**: a participant is online for a session
+  iff at least one healthy bound connection is registered on a live instance;
+  presence is **ephemeral** (never a PostgreSQL row, never a Redis key) and
+  derived from the registry each instance already keeps, so it cannot drift.
+  Multi-connection participants (phone + laptop, on different instances) stay
+  online until their **last** connection closes. Each instance publishes its
+  complete local set as a `presence.update` Redis notice (whole sets, not
+  deltas — a missed notice is repaired by the next one or by the periodic
+  digest) and re-publishes it every `PRESENCE_DIGEST_INTERVAL_MS`; a peer
+  silent for 3 × that interval is dropped. Clients receive one idempotent,
+  order-insensitive `presence.snapshot` after joining and whenever the
+  aggregate changes — never as part of the durable recovery snapshot. Verified
+  over real sockets with two instances: cross-instance propagation, leave
+  removal, multi-connection semantics, reconnect, degraded distribution,
+  crashed-peer expiry, graceful-shutdown withdrawal, heartbeat removal and
+  "presence writes nothing to PostgreSQL"
+  (`tests/integration/presence.test.ts`). See `docs/architecture/presence.md`,
+  `docs/testing/presence.md` and ADR-008
+- **Phase 7 — observability (implemented)**: one process-local Prometheus
+  registry per instance (`prom-client`) exposed at `GET /metrics`
+  (unauthenticated, same port, `METRICS_ENABLED` toggle; 404 when disabled).
+  31 metric families cover WebSocket transport, sessions, presence, Redis,
+  durable operations, quiz, doubt queue and recovery. Labels are restricted to
+  fixed enums (`operation`, `event`, `result`, `reason`, `status`, `role`,
+  `connection`, `code`, `state`) — ids such as `sessionId` / `participantId` /
+  `questionId` / `doubtId` / `requestId` are **forbidden** and enforced by
+  tests — so cardinality is bounded by construction. The endpoint renders
+  memory only and never queries PostgreSQL or Redis; `/health` stays
+  liveness-only. Pino logs are standardized on an `instanceId` base field plus
+  operation/session/participant fields, and never carry answers, payloads,
+  tokens or connection strings. No performance number is claimed: buckets are
+  provisional and Phase 8 revises them from measured traffic. See
+  `docs/architecture/observability.md`, `docs/testing/observability.md` and
+  ADR-009
 
 **Not implemented yet** (by design, in phase order): Dockerized
 multi-instance compose (tests spawn independent in-process instances today),
-presence, Prometheus/Grafana, k6 load testing. Do not assume any of this
-exists.
+Grafana dashboards/alerting, OpenTelemetry tracing, k6 load testing,
+authentication, attendance history. Do not assume any of this exists.
 
-## Stack (as of Phase 6)
+## Stack (as of Phase 7)
 
 TypeScript (strict, ESM) · Node.js ≥ 22 · Fastify 5 · `ws` 8 · Prisma +
 PostgreSQL 17 · Redis 6 (node-redis, Pub/Sub propagation only) · Zod · Pino ·
-Vitest · Docker Compose (PostgreSQL + Redis). k6, Nginx and
-Prometheus/Grafana arrive with their phases.
+`prom-client` · Vitest · Docker Compose (PostgreSQL + Redis). k6, Nginx and
+Grafana arrive with their phases.
 
 ## Commands
 
@@ -119,6 +153,21 @@ pnpm prisma:migrate         # create/apply a dev migration (needs db:up)
 curl -s http://localhost:3000/health
 # → {"status":"ok"}
 ```
+
+Liveness only — it deliberately does not check PostgreSQL or Redis.
+
+## Metrics
+
+```bash
+curl -s http://localhost:3000/metrics | head
+# → # HELP livepulse_ws_connections_active Current live WebSocket connections on this instance
+#   # TYPE livepulse_ws_connections_active gauge
+#   livepulse_ws_connections_active 2
+```
+
+Prometheus text exposition, per instance, no authentication (Phase 7), and no
+PostgreSQL/Redis dependency in the scrape path. Set `METRICS_ENABLED=false` to
+disable the endpoint (it then answers 404).
 
 ## WebSocket smoke test
 
@@ -153,7 +202,13 @@ curl -s http://localhost:3000/ws
   snapshot contract + guarantees/limitations)
 - `docs/architecture/doubt-queue.md` — Phase 6 doubt queue (ordering contract,
   events, concurrency, recovery integration)
+- `docs/architecture/presence.md` — Phase 7 presence (exact definition,
+  multi-connection rule, digest/staleness, guarantees, Redis failure behavior)
+- `docs/architecture/observability.md` — Phase 7 metrics catalogue (types,
+  buckets, label-cardinality rules, `/metrics` contract, logging policy)
 - `docs/testing/recovery.md` — how recovery is tested (scenarios R1–R11)
 - `docs/testing/doubt-queue.md` — how the doubt queue is tested (scenarios Q1–Q13)
-- `docs/decisions/` — architecture decision records (ADR-001–007)
+- `docs/testing/presence.md` — how presence is tested (unit + P1–P13)
+- `docs/testing/observability.md` — how observability is tested (unit + O1–O11)
+- `docs/decisions/` — architecture decision records (ADR-001–009)
 - `AGENT.md` — engineering principles, phase plan, honesty rules

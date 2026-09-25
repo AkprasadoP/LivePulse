@@ -9,6 +9,8 @@ import { DoubtRepository } from "../modules/doubts/doubt.repository.js";
 import { NotFoundError, InvalidStateTransitionError } from "../shared/errors.js";
 import { sessionJoinedMessage, sessionStateMessage } from "./protocol.js";
 import { buildRecoverySnapshot, type RecoverySnapshot } from "./recovery.js";
+import type { PresenceTracker } from "./presence.js";
+import { timeOperation, type Metrics } from "../infrastructure/metrics/index.js";
 import {
   clientEventSchemas,
   errorMessage,
@@ -32,10 +34,16 @@ import {
 } from "./doubt-handlers.js";
 import type { Distributor } from "./distribution.js";
 
+/**
+ * Per-instance handler context: the scoped logger plus Phase 7 metric handles.
+ * Bundled so every handler (and the shared `send` funnel) can record
+ * observations without threading a second parameter through every call site.
+ */
 export type HandlerLog = {
   info: (obj: Record<string, unknown>, msg: string) => void;
   warn: (obj: Record<string, unknown>, msg: string) => void;
   error: (obj: Record<string, unknown>, msg: string) => void;
+  metrics?: Metrics | undefined;
 };
 
 export interface HandlerDependencies {
@@ -56,6 +64,12 @@ export interface HandlerDependencies {
    * Redis receive path.
    */
   distributor?: Distributor;
+  /** Phase 7: ephemeral presence (derived from the registry; never durability). */
+  presenceTracker: PresenceTracker;
+  /** Publish local presence + broadcast a snapshot to the session if it changed. */
+  refreshPresence: (sessionId: string, except?: Connection) => void;
+  /** Push the current aggregated presence snapshot to one connection. */
+  sendPresenceSnapshot: (connection: Connection, sessionId: string) => void;
 }
 
 /** Serialize and send one envelope; failures are logged, never thrown. */
@@ -64,6 +78,18 @@ export function send(connection: Connection, message: ServerEnvelope, log: Handl
   connection.socket.send(JSON.stringify(message), (error) => {
     if (error) log.warn({ err: error.message }, "WebSocket send failed");
   });
+  log.metrics?.wsMessagesSent.inc();
+}
+
+/** Send a protocol error and record it by its (bounded) code. */
+export function sendProtocolError(
+  connection: Connection,
+  requestId: string | null,
+  payload: ErrorPayload,
+  log: HandlerLog,
+): void {
+  log.metrics?.wsProtocolErrors.inc({ code: payload.code });
+  send(connection, errorMessage(requestId, payload), log);
 }
 
 /**
@@ -117,16 +143,18 @@ export async function handleClientEnvelope(
   deps: HandlerDependencies,
 ): Promise<void> {
   const { requestId, type } = envelope;
+  const started = performance.now();
 
   if (!isKnownClientEvent(type)) {
     deps.log.warn({ eventType: type }, "WebSocket protocol error: unsupported event");
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "UNSUPPORTED_EVENT",
         message: `Unsupported event type: ${type}`,
         details: null,
-      }),
+      },
       deps.log,
     );
     return;
@@ -146,13 +174,14 @@ export async function handleClientEnvelope(
       { eventType: type, code, issues: payloadResult.error.issues.length },
       "WebSocket protocol error: invalid payload",
     );
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code,
         message,
         details: protocolIssueDetails(payloadResult.error),
-      }),
+      },
       deps.log,
     );
     return;
@@ -162,25 +191,23 @@ export async function handleClientEnvelope(
   if (requiresParticipant(type)) {
     if (connection.participantId === null) {
       deps.log.warn({ eventType: type }, "WebSocket protocol error: participant required");
-      send(
+      sendProtocolError(
         connection,
-        errorMessage(requestId, {
+        requestId,
+        {
           code: "NOT_A_PARTICIPANT",
           message: "Join with a participant identity before sending this event",
           details: null,
-        }),
+        },
         deps.log,
       );
       return;
     }
     if (connection.joinedSessionId === null) {
-      send(
+      sendProtocolError(
         connection,
-        errorMessage(requestId, {
-          code: "NOT_JOINED",
-          message: "Join a session first",
-          details: null,
-        }),
+        requestId,
+        { code: "NOT_JOINED", message: "Join a session first", details: null },
         deps.log,
       );
       return;
@@ -199,13 +226,14 @@ export async function handleClientEnvelope(
     connection.participantRole !== "TEACHER"
   ) {
     deps.log.warn({ eventType: type }, "WebSocket protocol error: teacher required");
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "TEACHER_REQUIRED",
         message: "This event requires a TEACHER participant",
         details: null,
-      }),
+      },
       deps.log,
     );
     return;
@@ -271,6 +299,11 @@ export async function handleClientEnvelope(
     }
   } catch (error) {
     handleError(connection, error, requestId, type, deps);
+  } finally {
+    deps.log.metrics?.wsHandlerDuration.observe(
+      { event: type },
+      (performance.now() - started) / 1000,
+    );
   }
 }
 
@@ -307,18 +340,15 @@ export function handleError(
 ): void {
   const mapped = protocolErrorFor(error);
   if (mapped) {
-    send(connection, errorMessage(requestId, mapped), deps.log);
+    sendProtocolError(connection, requestId, mapped, deps.log);
     return;
   }
   // Genuine server fault: log fully server-side, expose nothing.
   deps.log.error({ err: error, eventType, requestId }, "WebSocket handler internal error");
-  send(
+  sendProtocolError(
     connection,
-    errorMessage(requestId, {
-      code: "INTERNAL_ERROR",
-      message: "Internal server error",
-      details: null,
-    }),
+    requestId,
+    { code: "INTERNAL_ERROR", message: "Internal server error", details: null },
     deps.log,
   );
 }
@@ -335,7 +365,9 @@ async function handleSessionJoin(
 ): Promise<void> {
   // PostgreSQL is the only source of session state: read, never mutate the
   // session state machine.
-  const session = await deps.sessionRepository.getById(payload.sessionId);
+  const session = await timeOperation(deps.log.metrics, "session.join", () =>
+    deps.sessionRepository.getById(payload.sessionId),
+  );
   if (!session) {
     throw new NotFoundError("Session", payload.sessionId);
   }
@@ -343,13 +375,14 @@ async function handleSessionJoin(
   // Re-joining the SAME session is refused so a buggy client loop cannot
   // spin the registry (ADR-003). Switching sessions remains leave-then-join.
   if (connection.joinedSessionId === payload.sessionId) {
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "SESSION_ALREADY_JOINED",
         message: "Connection is already joined to this session",
         details: null,
-      }),
+      },
       deps.log,
     );
     return;
@@ -379,7 +412,9 @@ async function handleSessionJoin(
   const previousSessionId = deps.registry.joinSession(connection, payload.sessionId);
   if (previousSessionId) {
     deps.log.info({ previousSessionId }, "WebSocket session left (switch)");
+    deps.log.metrics?.sessionLeaves.inc({ reason: "switch" });
   }
+  deps.log.metrics?.sessionJoins.inc({ role: participant?.role ?? "viewer" });
   deps.log.info(
     { sessionId: payload.sessionId, participantId: participant?.id ?? null },
     "WebSocket session joined",
@@ -391,6 +426,7 @@ async function handleSessionJoin(
   // broken recovery path degrades to `recovery: null`, it never breaks the
   // join itself.
   let recovery: RecoverySnapshot | null = null;
+  const recoveryStarted = performance.now();
   try {
     recovery = await buildRecoverySnapshot(
       {
@@ -401,6 +437,8 @@ async function handleSessionJoin(
       payload.sessionId,
       participant?.id ?? null,
     );
+    deps.log.metrics?.recoveryBuilds.inc({ result: "ok" });
+    if (recovery?.doubts.truncated === true) deps.log.metrics?.recoveryTruncated.inc();
     deps.log.info(
       {
         sessionId: payload.sessionId,
@@ -410,10 +448,13 @@ async function handleSessionJoin(
       "Recovery snapshot built",
     );
   } catch (error) {
+    deps.log.metrics?.recoveryBuilds.inc({ result: "error" });
     deps.log.warn(
       { err: error instanceof Error ? error.message : String(error), sessionId: payload.sessionId },
       "Recovery snapshot failed (joining continues without recovery data)",
     );
+  } finally {
+    deps.log.metrics?.recoveryDuration.observe((performance.now() - recoveryStarted) / 1000);
   }
 
   send(
@@ -429,6 +470,14 @@ async function handleSessionJoin(
     deps.log,
   );
   send(connection, sessionStateMessage(requestId, serializeSessionState(session)), deps.log);
+
+  // Phase 7 presence, after session.joined/session.state (lifecycle order:
+  // registry updated -> presence published -> snapshot emitted). The joining
+  // connection gets its own snapshot; others get one only if the aggregate
+  // changed. A presence failure can never break the join.
+  deps.sendPresenceSnapshot(connection, payload.sessionId);
+  deps.refreshPresence(payload.sessionId, connection);
+  if (previousSessionId !== null) deps.refreshPresence(previousSessionId);
 }
 
 function handleSessionLeave(
@@ -440,6 +489,7 @@ function handleSessionLeave(
   const previousSessionId = deps.registry.leaveSession(connection);
   if (previousSessionId) {
     deps.log.info({ sessionId: previousSessionId }, "WebSocket session left");
+    deps.log.metrics?.sessionLeaves.inc({ reason: "leave" });
   }
   // The participant binding is session-scoped: leaving detaches it too.
   connection.participantId = null;
@@ -447,4 +497,5 @@ function handleSessionLeave(
   connection.displayName = null;
 
   send(connection, sessionStateMessage(requestId, detachedStateSnapshot()), deps.log);
+  if (previousSessionId !== null) deps.refreshPresence(previousSessionId);
 }

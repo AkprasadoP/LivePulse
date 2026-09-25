@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { RedisInfrastructure } from "../infrastructure/redis/index.js";
+import type { Metrics } from "../infrastructure/metrics/index.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { Connection } from "./connection.js";
 import {
@@ -11,6 +12,7 @@ import {
   doubtCreatedPayloadSchema,
   doubtResolvedPayloadSchema,
   doubtDismissedPayloadSchema,
+  presenceUpdatePayloadSchema,
   type ServerEnvelope,
 } from "./protocol.js";
 
@@ -92,6 +94,10 @@ export const DISTRIBUTED_EVENT_TYPES = [
   "doubt.created",
   "doubt.resolved",
   "doubt.dismissed",
+  // Phase 7 — presence notices. NOT rendered as a client frame: the receiver
+  // applies it to its PresenceTracker and recomputes its own aggregate (the
+  // client-facing `presence.snapshot` is emitted by the presence layer).
+  "presence.update",
 ] as const;
 export type DistributedEventType = (typeof DISTRIBUTED_EVENT_TYPES)[number];
 
@@ -104,6 +110,7 @@ const payloadSchemas: Record<DistributedEventType, z.ZodTypeAny> = {
   "doubt.created": doubtCreatedPayloadSchema,
   "doubt.resolved": doubtResolvedPayloadSchema,
   "doubt.dismissed": doubtDismissedPayloadSchema,
+  "presence.update": presenceUpdatePayloadSchema,
 };
 
 /** Narrow a validated envelope to a known event type (or null). */
@@ -140,9 +147,20 @@ export interface DistributorOptions {
   registry: SessionRegistry;
   /** Renders the wire frame for a validated remote event. */
   render: (event: {
-    type: DistributedEventType;
+    type: Exclude<DistributedEventType, "presence.update">;
     payload: Record<string, unknown>;
   }) => ServerEnvelope;
+  /**
+   * Phase 7: presence notices are not client frames. They are applied to the
+   * local presence tracker, which then emits its own `presence.snapshot` to
+   * local session clients. Optional so non-presence usages stay simple.
+   */
+  onPresenceUpdate?: (
+    payload: z.infer<typeof presenceUpdatePayloadSchema>,
+    originInstanceId: string,
+  ) => void;
+  /** Phase 7 metrics (optional; absent in unit-ish usages). */
+  metrics?: Metrics | undefined;
   log: {
     info: (obj: Record<string, unknown>, msg: string) => void;
     warn: (obj: Record<string, unknown>, msg: string) => void;
@@ -151,7 +169,7 @@ export interface DistributorOptions {
 }
 
 export function createDistributor(options: DistributorOptions): Distributor {
-  const { instanceId, redis, registry, render, log } = options;
+  const { instanceId, redis, registry, render, log, metrics } = options;
   const enabled = options.enabled ?? true;
 
   if (enabled) {
@@ -166,6 +184,7 @@ export function createDistributor(options: DistributorOptions): Distributor {
       parsed = JSON.parse(raw);
     } catch {
       log.warn({ channel }, "Distribution: received non-JSON message, ignoring");
+      metrics?.redisEventsIgnored.inc({ reason: "invalid_payload" });
       return;
     }
 
@@ -175,6 +194,7 @@ export function createDistributor(options: DistributorOptions): Distributor {
         { channel, issues: envelope.error.issues.length },
         "Distribution: received invalid event envelope, ignoring",
       );
+      metrics?.redisEventsIgnored.inc({ reason: "invalid_payload" });
       return;
     }
     const event = envelope.data;
@@ -189,6 +209,7 @@ export function createDistributor(options: DistributorOptions): Distributor {
         },
         "Distribution: unsupported schema version, rejecting event",
       );
+      metrics?.redisEventsIgnored.inc({ reason: "schema_version" });
       return;
     }
 
@@ -198,11 +219,13 @@ export function createDistributor(options: DistributorOptions): Distributor {
         { eventId: event.eventId, type: event.type },
         "Distribution: unknown event type, ignoring",
       );
+      metrics?.redisEventsIgnored.inc({ reason: "unknown_type" });
       return;
     }
 
     // Echo suppression (design §5). Also satisfies Test E locally.
     if (event.originInstanceId === instanceId) {
+      metrics?.redisEventsIgnored.inc({ reason: "echo" });
       return;
     }
 
@@ -212,17 +235,39 @@ export function createDistributor(options: DistributorOptions): Distributor {
         { eventId: event.eventId, type: event.type, issues: payload.error.issues.length },
         "Distribution: event payload failed schema validation, ignoring",
       );
+      metrics?.redisEventsIgnored.inc({ reason: "invalid_payload" });
+      return;
+    }
+
+    if (metrics) metrics.redisEventsReceived.inc();
+
+    // Presence notices update ephemeral local state instead of rendering a
+    // frame; the presence layer decides what (if anything) local clients see.
+    // Applied even with zero local subscribers so a client joining right
+    // after sees the freshest aggregate instead of waiting for the digest.
+    if (eventType === "presence.update") {
+      options.onPresenceUpdate?.(
+        payload.data as z.infer<typeof presenceUpdatePayloadSchema>,
+        event.originInstanceId,
+      );
+      if (registry.getConnectionsForSession(event.sessionId).length === 0) {
+        metrics?.redisEventsIgnored.inc({ reason: "no_local_subscribers" });
+      }
       return;
     }
 
     // Local-interest filter: zero local connections for the session -> ignore.
     const targets = registry.getConnectionsForSession(event.sessionId);
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      metrics?.redisEventsIgnored.inc({ reason: "no_local_subscribers" });
+      return;
+    }
 
     const message = render({ type: eventType, payload: payload.data as Record<string, unknown> });
     for (const connection of targets) {
-      sendFrame(connection, message, log);
+      sendFrame(connection, message, log, metrics);
     }
+    metrics?.redisEventsRendered.inc();
     log.info(
       {
         eventId: event.eventId,
@@ -268,9 +313,13 @@ function sendFrame(
   connection: Connection,
   message: ServerEnvelope,
   log: { warn: (obj: Record<string, unknown>, msg: string) => void },
+  metrics?: Metrics | undefined,
 ): void {
   if (connection.socket.readyState !== connection.socket.OPEN) return;
   connection.socket.send(JSON.stringify(message), (error) => {
     if (error) log.warn({ err: error.message }, "WebSocket send failed (remote event)");
   });
+  // Every frame written to a socket is counted, including remote-rendered ones
+  // (ADR-009: ws_messages_sent_total is "frames this instance wrote").
+  metrics?.wsMessagesSent.inc();
 }

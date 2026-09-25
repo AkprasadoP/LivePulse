@@ -1,6 +1,6 @@
 import type { Connection } from "./connection.js";
 import type { HandlerDependencies } from "./handlers.js";
-import { send, broadcast } from "./handlers.js";
+import { send, broadcast, sendProtocolError } from "./handlers.js";
 import { NotFoundError } from "../shared/errors.js";
 import {
   quizStartedMessage,
@@ -9,7 +9,6 @@ import {
   answerAcceptedMessage,
   answerRejectedMessage,
   leaderboardUpdatedMessage,
-  errorMessage,
   type ServerEnvelope,
 } from "./protocol.js";
 
@@ -46,19 +45,21 @@ export async function handleQuizStart(
   const session = await deps.sessionRepository.getById(sessionId);
   if (!session) throw new NotFoundError("Session", sessionId);
   if (session.state !== "LIVE") {
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "SESSION_NOT_LIVE",
         message: "Start the session before starting a quiz",
         details: null,
-      }),
+      },
       deps.log,
     );
     return;
   }
 
   const updated = await deps.quizRepository.transitionQuizState(quiz.id, "ACTIVE");
+  deps.log.metrics?.quizTransitions.inc({ event: "quiz.start" });
   deps.log.info({ sessionId, quizId: quiz.id }, "WebSocket quiz started");
   // COMMIT succeeded -> local broadcast -> post-commit publish (in that
   // order; Redis is never inside the PostgreSQL transaction — ADR-005).
@@ -95,19 +96,21 @@ export async function handleQuestionPublish(
     throw new NotFoundError("Question", payload.questionId);
   }
   if (quiz.state !== "ACTIVE") {
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "QUIZ_NOT_ACTIVE",
         message: "Start the quiz before publishing questions",
         details: null,
-      }),
+      },
       deps.log,
     );
     return;
   }
 
   const updated = await deps.quizRepository.transitionQuestionState(question.id, "PUBLISHED");
+  deps.log.metrics?.quizTransitions.inc({ event: "question.publish" });
   deps.log.info(
     { sessionId, quizId: quiz.id, questionId: question.id },
     "WebSocket question published",
@@ -176,6 +179,7 @@ export async function handleQuestionClose(
   }
 
   const updated = await deps.quizRepository.transitionQuestionState(question.id, "CLOSED");
+  deps.log.metrics?.quizTransitions.inc({ event: "question.close" });
   deps.log.info(
     { sessionId, quizId: quiz.id, questionId: question.id },
     "WebSocket question closed",
@@ -245,20 +249,33 @@ export async function handleQuizAnswer(
 
   // Persist + elect atomically (ADR-004). Duplicate-safe; re-checks question
   // state under the row lock, so an in-flight close is respected.
+  const answerStarted = performance.now();
   const result = await deps.answerRepository.submitWithElection({
     question,
     participantId,
     content: payload.content,
   });
+  const answerSeconds = (performance.now() - answerStarted) / 1000;
+  deps.log.metrics?.quizAnswerDuration.observe(answerSeconds);
+  deps.log.metrics?.dbOperationDuration.observe({ operation: "quiz.answer" }, answerSeconds);
+  deps.log.metrics?.quizAnswers.inc({
+    result:
+      result.outcome === "rejected"
+        ? "rejected"
+        : result.outcome === "duplicate"
+          ? "duplicate"
+          : "accepted",
+  });
 
   if (result.outcome === "rejected") {
-    send(
+    sendProtocolError(
       connection,
-      errorMessage(requestId, {
+      requestId,
+      {
         code: "QUESTION_NOT_ACCEPTING_ANSWERS",
         message: "This question is not accepting answers",
         details: null,
-      }),
+      },
       deps.log,
     );
     return;

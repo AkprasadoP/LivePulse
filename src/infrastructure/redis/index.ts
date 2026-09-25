@@ -1,5 +1,6 @@
 import { createClient, type RedisClientType } from "redis";
 import type { AppConfig } from "../../config/index.js";
+import type { Metrics } from "../metrics/index.js";
 
 /**
  * Redis infrastructure for the Phase 4 distribution layer.
@@ -32,6 +33,8 @@ export interface RedisInfrastructure {
 
 export interface RedisInfrastructureOptions {
   config: AppConfig;
+  /** Phase 7 metrics (optional; absent in unit-ish usages). */
+  metrics?: Metrics | undefined;
   log: {
     info: (obj: Record<string, unknown>, msg: string) => void;
     warn: (obj: Record<string, unknown>, msg: string) => void;
@@ -46,7 +49,7 @@ const RECONNECT_CAP_MS = 2_000;
 export function createRedisInfrastructure(
   options: RedisInfrastructureOptions,
 ): RedisInfrastructure {
-  const { config, log } = options;
+  const { config, log, metrics } = options;
 
   const reconnectStrategy = (retries: number): number | Error => {
     if (closing) return new Error("Redis client is shutting down");
@@ -68,13 +71,22 @@ export function createRedisInfrastructure(
   let messageHandler: ((channel: string, message: string) => void) | null = null;
   let closing = false;
 
-  publisher.on("error", (error: Error) => {
-    // 'error' fires on every failed reconnect attempt too — warn, never throw.
-    log.warn({ err: error.message }, "Redis publisher connection error");
-  });
-  subscriber.on("error", (error: Error) => {
-    log.warn({ err: error.message }, "Redis subscriber connection error");
-  });
+  // Connection-lifecycle observability (ADR-009): 'ready' = usable, 'end' =
+  // closed, 'reconnecting' = attempting again. Never fatal (Phase 4 degrade).
+  const trackConnection = (client: RedisClientType, name: "publisher" | "subscriber") => {
+    client.on("error", (error: Error) => {
+      // 'error' fires on every failed reconnect attempt too — warn, never throw.
+      log.warn({ err: error.message, connection: name }, `Redis ${name} connection error`);
+      metrics?.redisConnectionErrors.inc({ connection: name });
+    });
+    client.on("ready", () => metrics?.redisConnected.set({ connection: name }, 1));
+    client.on("end", () => metrics?.redisConnected.set({ connection: name }, 0));
+    client.on("reconnecting", () => metrics?.redisConnected.set({ connection: name }, 0));
+    // Presence-agnostic initial value: not connected until proven ready.
+    metrics?.redisConnected.set({ connection: name }, 0);
+  };
+  trackConnection(publisher, "publisher");
+  trackConnection(subscriber, "subscriber");
 
   return {
     async publish(channel, message) {
@@ -83,7 +95,9 @@ export function createRedisInfrastructure(
       if (closing) return;
       try {
         await publisher.publish(channel, message);
+        metrics?.redisPublish.inc({ result: "ok" });
       } catch (error) {
+        metrics?.redisPublish.inc({ result: "error" });
         log.warn(
           { err: error instanceof Error ? error.message : String(error), channel },
           "Redis publish failed (propagation degraded, PostgreSQL state is authoritative)",

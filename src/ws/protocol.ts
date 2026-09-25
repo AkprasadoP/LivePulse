@@ -316,6 +316,41 @@ export const doubtQueueUpdatedPayloadSchema = z.object({
   truncated: z.boolean(),
 });
 
+// ---- Phase 7: presence -----------------------------------------------------
+
+/**
+ * A participant as seen by presence. Deliberately minimal: no connection ids,
+ * no instance ids, no infrastructure detail — membership in the snapshot list
+ * means "online".
+ */
+export const presenceParticipantSchema = z.object({
+  participantId: z.uuid(),
+  displayName: z.string(),
+  role: z.enum(["TEACHER", "STUDENT"]),
+});
+export type PresenceParticipant = z.infer<typeof presenceParticipantSchema>;
+
+/**
+ * Server → client presence update. Idempotent and order-insensitive: it is the
+ * whole aggregated online set for the session, so a client replaces its view
+ * wholesale and duplicate/late snapshots are harmless.
+ */
+export const presenceSnapshotPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  participants: z.array(presenceParticipantSchema),
+});
+
+/**
+ * Internal (Redis) notice: one instance's COMPLETE local online set for one
+ * session. Idempotent by construction, so a missed notice is repaired by the
+ * next update/digest rather than by replaying deltas.
+ */
+export const presenceUpdatePayloadSchema = z.object({
+  sessionId: z.uuid(),
+  seq: z.number().int(),
+  participants: z.array(presenceParticipantSchema),
+});
+
 export const errorPayloadSchema = z.object({
   code: z.enum([
     "INVALID_MESSAGE",
@@ -433,6 +468,13 @@ export function doubtQueueUpdatedMessage(
   payload: z.infer<typeof doubtQueueUpdatedPayloadSchema>,
 ): ServerEnvelope {
   return { type: "doubt.queue.updated", requestId, payload };
+}
+
+export function presenceSnapshotMessage(
+  requestId: string | null,
+  payload: z.infer<typeof presenceSnapshotPayloadSchema>,
+): ServerEnvelope {
+  return { type: "presence.snapshot", requestId, payload };
 }
 
 export function errorMessage(requestId: string | null, payload: ErrorPayload): ServerEnvelope {

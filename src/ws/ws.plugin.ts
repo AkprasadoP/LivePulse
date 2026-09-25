@@ -3,6 +3,7 @@ import type { IncomingMessage, Server as HttpServer } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import { SessionRegistry } from "./session-registry.js";
+import type { Connection } from "./connection.js";
 import { SessionRepository } from "../modules/sessions/session.repository.js";
 import { QuizRepository } from "../modules/quizzes/quiz.repository.js";
 import { AnswerRepository } from "../modules/answers/answer.repository.js";
@@ -11,6 +12,7 @@ import { ParticipantRepository } from "../modules/participants/participant.repos
 import { DoubtRepository } from "../modules/doubts/doubt.repository.js";
 import { handleClientEnvelope } from "./handlers.js";
 import { createDistributor, type Distributor } from "./distribution.js";
+import { PresenceTracker } from "./presence.js";
 import { createRedisInfrastructure } from "../infrastructure/redis/index.js";
 import {
   clientEnvelopeSchema,
@@ -24,6 +26,7 @@ import {
   doubtCreatedMessage,
   doubtResolvedMessage,
   doubtDismissedMessage,
+  presenceSnapshotMessage,
   type ServerEnvelope,
 } from "./protocol.js";
 import type { AppConfig } from "../config/index.js";
@@ -67,15 +70,16 @@ const MAX_PAYLOAD_BYTES = 64 * 1024;
  *     -> 'connection' initializes Connection state + ping hook
  *     -> 'message' -> parse -> validate -> dispatch to handler
  *     -> heartbeat interval pings + sweeps dead sockets
- *     -> 'close' -> registry cleanup
+ *     -> 'close' -> registry cleanup -> presence refresh
  *     -> layer.close() on graceful shutdown
  *
- * Upgrade routing is done with our own hook rather than handleUpgrade for
- * every request: anything not targeting /ws is destroyed immediately, and a
- * plain HTTP GET /ws is answered 426 by the normal Fastify route.
+ * Presence + metrics (Phase 7) hang off exactly these existing lifecycle
+ * events — there is deliberately NO second heartbeat and no parallel
+ * connection bookkeeping (ADR-008/ADR-009).
  */
 export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   const { config, httpServer, app } = options;
+  const metrics = app.metrics ?? undefined;
   const registry = new SessionRegistry();
   const sessionRepository = new SessionRepository(app.prisma);
   const quizRepository = new QuizRepository(app.prisma);
@@ -91,16 +95,121 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     maxPayload: MAX_PAYLOAD_BYTES,
   });
 
+  // ---- Phase 7 presence (ephemeral, instance-local + Redis notices) --------
+  // Presence is DERIVED from the live registry, never stored: PostgreSQL holds
+  // durable business state, Redis only carries notices. A peer silent for
+  // 3 × the digest interval is dropped (crashed/partitioned). See ADR-008.
+  const presenceTracker = new PresenceTracker({
+    registry,
+    staleMs: config.PRESENCE_DIGEST_INTERVAL_MS * 3,
+  });
+  /** Last local contribution published per session (avoids redundant notices). */
+  const lastPublishedLocal = new Map<string, string>();
+  /** Local per-participant connection counts (transition metrics only). */
+  const localCounts = new Map<string, Map<string, number>>();
+  /** Connections killed by the heartbeat sweep — for the close-reason metric. */
+  const heartbeatTerminated = new WeakSet<Connection>();
+
+  /** Keep the bounded infrastructure gauges in step with the registry. */
+  function syncGauges(): void {
+    if (!metrics) return;
+    const sessions = new Set<string>();
+    for (const connection of registry.getAllConnections()) {
+      if (connection.joinedSessionId !== null) sessions.add(connection.joinedSessionId);
+    }
+    metrics.wsConnectionsActive.set(registry.connectionCount);
+    metrics.sessionsWithConnections.set(sessions.size);
+    metrics.presenceLocalParticipants.set(presenceTracker.localParticipantCount());
+    metrics.presenceRemoteInstances.set(presenceTracker.remoteInstanceCount());
+  }
+
+  /**
+   * Local presence TRANSITIONS (0 -> 1 = online, 1 -> 0 = offline) for a
+   * session. Multi-connection correctness lives here: while any connection is
+   * still bound, no offline transition is recorded.
+   */
+  function reflectLocalTransitions(sessionId: string): void {
+    const current = new Map<string, number>();
+    for (const connection of registry.getConnectionsForSession(sessionId)) {
+      if (connection.participantId === null) continue;
+      current.set(connection.participantId, (current.get(connection.participantId) ?? 0) + 1);
+    }
+    const previous = localCounts.get(sessionId) ?? new Map<string, number>();
+    if (metrics) {
+      for (const participantId of current.keys()) {
+        if (!previous.has(participantId)) metrics.presenceTransitions.inc({ state: "online" });
+      }
+      for (const participantId of previous.keys()) {
+        if (!current.has(participantId)) metrics.presenceTransitions.inc({ state: "offline" });
+      }
+    }
+    if (current.size === 0) localCounts.delete(sessionId);
+    else localCounts.set(sessionId, current);
+  }
+
+  /**
+   * Publish this instance's COMPLETE local online set for a session. Full-set
+   * (not deltas) is what makes a missed notice self-healing: the next notice
+   * or digest simply overwrites the receiver's contribution.
+   */
+  function publishLocalPresence(sessionId: string, force = false): void {
+    const local = presenceTracker.localParticipants(sessionId);
+    const serialized = JSON.stringify(local);
+    if (!force && lastPublishedLocal.get(sessionId) === serialized) return;
+    lastPublishedLocal.set(sessionId, serialized);
+    distributor.publish({
+      type: "presence.update",
+      sessionId,
+      payload: { sessionId, seq: presenceTracker.nextLocalSeq(), participants: local },
+    });
+  }
+
+  /** Broadcast the aggregated snapshot if the set actually changed. */
+  function broadcastPresenceSnapshot(sessionId: string, except?: Connection): void {
+    const participants = presenceTracker.snapshotIfChanged(sessionId);
+    if (participants === null) return;
+    const message = presenceSnapshotMessage(null, { sessionId, participants });
+    for (const target of registry.getConnectionsForSession(sessionId)) {
+      if (target === except) continue;
+      sendFrame(target, message);
+    }
+  }
+
+  /**
+   * Presence refresh after a lifecycle event: publish our local set (only if
+   * it changed, unless forced by the digest), then push the recomputed
+   * aggregate to local clients. Failure here must never break the lifecycle
+   * that called it, so nothing in this path throws.
+   */
+  function refreshPresence(sessionId: string, except?: Connection, force = false): void {
+    reflectLocalTransitions(sessionId);
+    publishLocalPresence(sessionId, force);
+    broadcastPresenceSnapshot(sessionId, except);
+    syncGauges();
+  }
+
+  /** Send one connection the current aggregated presence snapshot. */
+  function sendPresenceSnapshot(connection: Connection, sessionId: string): void {
+    sendFrame(
+      connection,
+      presenceSnapshotMessage(null, {
+        sessionId,
+        participants: presenceTracker.aggregate(sessionId),
+      }),
+    );
+  }
+
   // ---- Phase 4 distribution (Redis Pub/Sub) --------------------------------
   // Post-commit event fan-out ONLY (ADR-005). The subscriber path is
   // read-only: validate -> version check -> echo drop -> local-interest
   // filter -> render frames. It never writes PostgreSQL and never republishes.
-  const redis = createRedisInfrastructure({ config, log: app.log });
+  const redis = createRedisInfrastructure({ config, log: app.log, metrics });
   const distributor = createDistributor({
     instanceId: config.INSTANCE_ID,
     redis,
     registry,
     log: app.log,
+    metrics,
     render: (event) => {
       switch (event.type) {
         case "quiz.started":
@@ -120,6 +229,19 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
         case "doubt.dismissed":
           return doubtDismissedMessage(null, event.payload as never);
       }
+    },
+    // Presence notices are not client frames: they update ephemeral local
+    // state, after which THIS instance decides what its clients see.
+    onPresenceUpdate: (payload, originInstanceId) => {
+      const applied = presenceTracker.recordRemote(
+        originInstanceId,
+        payload.seq,
+        payload.sessionId,
+        payload.participants,
+      );
+      if (!applied) return; // stale/duplicate (older seq) — harmless to ignore
+      broadcastPresenceSnapshot(payload.sessionId);
+      syncGauges();
     },
   });
   const distributionReady: Promise<void> = config.DISTRIBUTION_ENABLED
@@ -154,6 +276,8 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     // instance-local registry entry exists before any client frame can be
     // processed (the 'message' handlers attach below, synchronously).
     const connection = registry.addConnection(socket);
+    metrics?.wsConnectionsActive.inc();
+    metrics?.wsConnectionsOpened.inc();
     app.log.info({ remoteAddress: request.socket.remoteAddress }, "WebSocket connection opened");
 
     connection.socket.on("pong", () => {
@@ -161,11 +285,12 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     });
 
     connection.socket.on("message", (data: unknown) => {
+      metrics?.wsMessagesReceived.inc();
       void processMessage(connection, data).catch((error) => {
         // processMessage is written not to throw, but the safety net stays:
         // a bug in one message must never kill the socket or the process.
         app.log.error({ err: error }, "WebSocket message processing failed unexpectedly");
-        safeSend(
+        sendFrame(
           connection,
           errorMessage(null, {
             code: "INTERNAL_ERROR",
@@ -182,9 +307,30 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       app.log.warn({ err: error.message }, "WebSocket connection error");
     });
 
-    connection.socket.on("close", (code, reason) => {
+    connection.socket.on("close", (code, closeReason) => {
+      // Capture the session BEFORE cleanup so presence can be refreshed for
+      // the session this connection is leaving (lifecycle order: registry
+      // cleanup -> presence refresh -> snapshot).
+      const sessionId = connection.joinedSessionId;
+      const byHeartbeat = heartbeatTerminated.has(connection);
       registry.removeConnection(connection);
-      app.log.info({ code, reason: reason.toString() || undefined }, "WebSocket connection closed");
+      metrics?.wsConnectionsActive.set(registry.connectionCount);
+      metrics?.wsConnectionsClosed.inc({ reason: byHeartbeat ? "heartbeat" : "client" });
+      if (sessionId !== null) {
+        metrics?.sessionLeaves.inc({ reason: "disconnect" });
+        if (registry.countForSession(sessionId) === 0) presenceTracker.forgetSession(sessionId);
+        refreshPresence(sessionId);
+      } else {
+        syncGauges();
+      }
+      app.log.info(
+        {
+          code,
+          closeReason: closeReason.toString() || undefined,
+          reason: byHeartbeat ? "heartbeat" : "client",
+        },
+        "WebSocket connection closed",
+      );
     });
   });
 
@@ -192,10 +338,11 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   // One interval for the whole server. Each tick: mark everyone as needing a
   // pong, ping them; at the NEXT tick, anyone still !isAlive missed a full
   // interval's pong -> terminate. Terminated sockets fire 'close', which runs
-  // the normal registry cleanup.
+  // the normal registry + presence cleanup.
   const heartbeat = setInterval(() => {
     for (const connection of registry.getAllConnections()) {
       if (!connection.isAlive) {
+        heartbeatTerminated.add(connection);
         app.log.info(
           { connectedAt: connection.connectedAt.toISOString() },
           "WebSocket heartbeat cleanup",
@@ -209,13 +356,42 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   }, config.WS_HEARTBEAT_INTERVAL_MS);
   heartbeat.unref(); // never keep the process alive just for pings
 
+  // ---- Presence digest ----------------------------------------------------
+  // Redis Pub/Sub is at-most-once, so every instance republishes its full
+  // local set on this cadence. A missed notice therefore costs freshness, not
+  // correctness — the next digest repairs it. Expiring silent peers is the
+  // only way a crashed instance's participants disappear.
+  const presenceDigest = setInterval(() => {
+    const sessions = presenceTracker.localSessions();
+    for (const sessionId of sessions) refreshPresence(sessionId, undefined, true);
+    if (sessions.length > 0) metrics?.presenceReconcile.inc({ result: "digest" });
+    const touched = presenceTracker.expireStale();
+    if (touched.length > 0) {
+      metrics?.presenceReconcile.inc({ result: "expired" });
+      for (const sessionId of touched) broadcastPresenceSnapshot(sessionId);
+    }
+    syncGauges();
+  }, config.PRESENCE_DIGEST_INTERVAL_MS);
+  presenceDigest.unref();
+
   // ---- Shutdown -----------------------------------------------------------
   // Order (Phase 4 §13): sockets first (as in Phase 2), then Redis
   // unsubscribe/quit, then the WSS. Nothing here can hang: disconnect() is
   // socket-level, not command-level.
   const close = async (): Promise<void> => {
     clearInterval(heartbeat);
+    clearInterval(presenceDigest);
     httpServer.removeListener("upgrade", upgradeListener);
+    // Graceful departure: withdraw our local presence BEFORE Redis closes so
+    // peers stop counting our participants immediately instead of waiting for
+    // the 3 × digest staleness window. Best-effort (publish never throws).
+    for (const sessionId of presenceTracker.localSessions()) {
+      distributor.publish({
+        type: "presence.update",
+        sessionId,
+        payload: { sessionId, seq: presenceTracker.nextLocalSeq(), participants: [] },
+      });
+    }
     for (const connection of registry.getAllConnections()) {
       connection.socket.close(1001, "server shutting down");
     }
@@ -234,14 +410,12 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   };
 
   // ---- Message pipeline ---------------------------------------------------
-  async function processMessage(
-    connection: ReturnType<SessionRegistry["addConnection"]>,
-    data: unknown,
-  ): Promise<void> {
+  async function processMessage(connection: Connection, data: unknown): Promise<void> {
     const log = {
       info: (obj: Record<string, unknown>, msg: string) => app.log.info(obj, msg),
       warn: (obj: Record<string, unknown>, msg: string) => app.log.warn(obj, msg),
       error: (obj: Record<string, unknown>, msg: string) => app.log.error(obj, msg),
+      metrics,
     };
 
     let parsed: unknown;
@@ -249,7 +423,8 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       parsed = JSON.parse(String(data));
     } catch {
       app.log.warn("WebSocket protocol error: invalid JSON");
-      safeSend(
+      metrics?.wsProtocolErrors.inc({ code: "INVALID_MESSAGE" });
+      sendFrame(
         connection,
         errorMessage(null, {
           code: "INVALID_MESSAGE",
@@ -262,7 +437,8 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
 
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       app.log.warn("WebSocket protocol error: non-object message");
-      safeSend(
+      metrics?.wsProtocolErrors.inc({ code: "INVALID_MESSAGE" });
+      sendFrame(
         connection,
         errorMessage(null, {
           code: "INVALID_MESSAGE",
@@ -286,7 +462,8 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
         { issues: envelope.error.issues.length },
         "WebSocket protocol error: invalid envelope",
       );
-      safeSend(
+      metrics?.wsProtocolErrors.inc({ code: "INVALID_REQUEST" });
+      sendFrame(
         connection,
         errorMessage(requestId, {
           code: "INVALID_REQUEST",
@@ -312,16 +489,18 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       prisma: app.prisma,
       log,
       distributor,
+      presenceTracker,
+      refreshPresence,
+      sendPresenceSnapshot,
     });
   }
 
-  function safeSend(
-    connection: ReturnType<SessionRegistry["addConnection"]>,
-    message: ServerEnvelope,
-  ): void {
+  /** Serialize + send one envelope on a connection; failures are logged only. */
+  function sendFrame(connection: Connection, message: ServerEnvelope): void {
     if (connection.socket.readyState !== connection.socket.OPEN) return;
     connection.socket.send(JSON.stringify(message), (error) => {
       if (error) app.log.warn({ err: error.message }, "WebSocket send failed");
     });
+    metrics?.wsMessagesSent.inc();
   }
 }
