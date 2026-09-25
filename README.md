@@ -12,8 +12,8 @@ WS protocol: `docs/api/websocket-protocol.md` · Schema:
 
 ## Current implementation status
 
-**Phase 4 — Distributed WebSockets (Redis Pub/Sub distribution)** (complete;
-Phases 1–3 retained beneath it):
+**Phase 5 — Reconnect & Recovery (PostgreSQL snapshot on rejoin)** (complete;
+Phases 1–4 retained beneath it):
 
 - Everything from Phases 1–2: typed Fastify HTTP server, fail-fast Zod
   config, Pino logging, graceful shutdown, liveness-only `/health`, the
@@ -40,8 +40,8 @@ Phases 1–3 retained beneath it):
   simultaneous correct answers (the 100 race repeated 3×) and a mixed
   correct/incorrect run — exactly one winner on every run
   (`docs/testing/concurrency.md`)
-- Vitest suites: 49 unit tests + 91 integration tests against real
-  PostgreSQL and real WebSocket clients
+- Vitest suites: 51 unit tests + 104 integration tests against real
+  PostgreSQL, real Redis and real WebSocket clients
 - **Phase 4 — distributed WebSockets (implemented)**: inter-instance event
   distribution over Redis Pub/Sub, strictly as post-commit event notices on a
   single global channel — PostgreSQL stays the sole source of truth, winner
@@ -53,13 +53,26 @@ Phases 1–3 retained beneath it):
   instances still electing exactly one winner, clean shutdown, and
   disabled-distribution degradation (`tests/integration/distributed.test.ts`).
   See `docs/architecture/distributed-websockets.md` and ADR-005
+- **Phase 5 — reconnect & recovery (implemented)**: `session.join` now returns
+  a `recovery` snapshot read purely from PostgreSQL — session quizzes with
+  their states, the current published/closed question, the bound participant's
+  stored answer verdict, and current standings. A client that drops and
+  reconnects **to any instance** converges to authoritative state and resumes
+  live delivery; missed transient events are never replayed, and a lost
+  `answer.accepted` is recovered from the snapshot or by an idempotent retry
+  (which can never create a second winner — the DB still elects one). Redis is
+  not involved in the recovery path at all. Verified over real sockets across
+  two independent instances, including the full "participate on WS-A, WS-A
+  stops, reconnect to WS-B, recover, continue" criterion
+  (`tests/integration/recovery.test.ts`). See
+  `docs/architecture/recovery.md`, `docs/testing/recovery.md` and ADR-006
 
 **Not implemented yet** (by design, in phase order): Dockerized
 multi-instance compose (tests spawn independent in-process instances today),
-presence/doubt-queue Redis structures, reconnect recovery, Prometheus/Grafana,
-k6 load testing. Do not assume any of this exists.
+presence/doubt-queue Redis structures, Prometheus/Grafana, k6 load testing.
+Do not assume any of this exists.
 
-## Stack (as of Phase 4)
+## Stack (as of Phase 5)
 
 TypeScript (strict, ESM) · Node.js ≥ 22 · Fastify 5 · `ws` 8 · Prisma +
 PostgreSQL 17 · Redis 6 (node-redis, Pub/Sub propagation only) · Zod · Pino ·
@@ -121,5 +134,8 @@ curl -s http://localhost:3000/ws
 - `docs/testing/concurrency.md` — how the one-winner race is demonstrated
 - `docs/architecture/distributed-websockets.md` — Phase 4 horizontal scaling
   (design + implemented boundary)
-- `docs/decisions/` — architecture decision records (ADR-001–005)
+- `docs/architecture/recovery.md` — Phase 5 reconnect & recovery (design +
+  snapshot contract + guarantees/limitations)
+- `docs/testing/recovery.md` — how recovery is tested (scenarios R1–R11)
+- `docs/decisions/` — architecture decision records (ADR-001–006)
 - `AGENT.md` — engineering principles, phase plan, honesty rules

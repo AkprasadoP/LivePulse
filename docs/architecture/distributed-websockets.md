@@ -9,10 +9,11 @@
 > §2–§14 below retain the design reasoning; where implementation chose a
 > different shape, the divergence is stated in place.
 >
-> Still future-work (unchanged): Dockerized multi-instance compose (Phase 6
-> per the plan — tests spawn independent in-process instances today),
-> reconnect/recovery snapshots (Phase 7), and the failure drills (Phase 11;
-> §13 defines them, none executed yet).
+> Still future-work: Dockerized multi-instance compose (tests spawn
+> independent in-process instances today) and the failure drills (§13 defines
+> them, none executed yet). Reconnect/recovery snapshots are now
+> **implemented** (Phase 5, ADR-006) — `session.join` returns a PostgreSQL
+> `recovery` snapshot; see `docs/architecture/recovery.md`.
 
 ## 0. The three kinds of state (the distinction everything else rests on)
 
@@ -164,10 +165,10 @@ acks, no replay**. The design accepts this and compensates with PostgreSQL:
 | Scenario                                                   | What happens                                                                                                                                                                    | Recovery                                                                                                                                                                                               |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | WS-2 subscribed and healthy                                | Notice delivered; local broadcast                                                                                                                                               | —                                                                                                                                                                                                      |
-| WS-2 momentarily slow/disconnected (reconnecting to Redis) | Notice lost. Pub/Sub holds nothing.                                                                                                                                             | Clients on WS-2 reconcile from PostgreSQL (on next relevant interaction, on reconnect — Phase 7, or on any state read). **No durable data is lost — only a real-time push.**                           |
+| WS-2 momentarily slow/disconnected (reconnecting to Redis) | Notice lost. Pub/Sub holds nothing.                                                                                                                                             | Clients on WS-2 reconcile from PostgreSQL (on next relevant interaction, on reconnect — Phase 5, implemented, or on any state read). **No durable data is lost — only a real-time push.**              |
 | Redis down at publish time                                 | Origin instance logs a warning and **continues serving its own clients** (local broadcast already happened; the commit already happened). Cross-instance clients miss the push. | Degraded mode: every instance still serves its local clients fully; state convergence is via PostgreSQL. Publishing is best-effort; we do NOT buffer/retry Pub/Sub notices (they are hints, not data). |
 | Redis down at subscribe time / dies between                | Instance keeps running, keeps serving local clients, keeps committing to PostgreSQL. Periodic reconnect with capped backoff.                                                    | When Redis returns, subscription resumes. Missed pushes are unrecoverable _as pushes_ — clients reconcile from PostgreSQL.                                                                             |
-| Whole instance crashes                                     | Its sockets die. Pub/Sub unaffected for others.                                                                                                                                 | Reconnect flow (Phase 7) rebuilds client state from PostgreSQL.                                                                                                                                        |
+| Whole instance crashes                                     | Its sockets die. Pub/Sub unaffected for others.                                                                                                                                 | Reconnect flow (Phase 5, ADR-006) rebuilds client state from the `session.joined.recovery` snapshot.                                                                                                   |
 
 **Can a quiz answer be lost?** No. Answers (and winners) live in PostgreSQL,
 committed by the instance that received them, before any publication exists.
@@ -193,7 +194,7 @@ what PostgreSQL already is. The recovery model is:
 WS-2 crashes → restarts → (empty registry, no subscriptions)
   → PostgreSQL is authoritative
   → each reconnecting client: session.join → handler reads PostgreSQL →
-    session.joined + session.state (current quiz/question state snapshot)
+    session.joined (incl. the Phase 5 `recovery` snapshot) + session.state
   → subscription re-established → new events flow
 ```
 
@@ -244,7 +245,7 @@ believes is still unpublished. Analysis:
 
 **Client contract — trust events, reconcile against truth:** clients treat
 event frames as hints and the protocol's authoritative snapshots
-(`session.state`, join-time state, future reconnect snapshot) as truth. The
+(`session.state`, join-time state, the `session.joined.recovery` snapshot) as truth. The
 protocol doc already forbids clients from assuming delivery ordering;
 implementation should add: after a gap (reconnect, missed frames), clients
 re-read state rather than extrapolate. Servers keep the invariant side:

@@ -7,6 +7,8 @@ import {
   errorMessage,
   protocolIssueDetails,
   sessionJoinSchema,
+  sessionJoinedPayloadSchema,
+  recoverySnapshotSchema,
 } from "../../src/ws/protocol.js";
 import { z } from "zod";
 
@@ -78,6 +80,7 @@ describe("server message factories", () => {
       participantId: null,
       role: null,
       displayName: null,
+      recovery: null,
     });
     expect(message).toEqual({
       type: "session.joined",
@@ -88,6 +91,7 @@ describe("server message factories", () => {
         participantId: null,
         role: null,
         displayName: null,
+        recovery: null,
       },
     });
   });
@@ -121,5 +125,45 @@ describe("protocolIssueDetails", () => {
     expect(result.success).toBe(false);
     const details = protocolIssueDetails(result.error!);
     expect(details?.issues[0]?.path).toBe("payload.sessionId");
+  });
+});
+
+describe("session recovery snapshot schema (Phase 5)", () => {
+  it("accepts a full snapshot and rejects an unknown question state (DRAFT never appears)", () => {
+    const snapshot = {
+      quizzes: [
+        { quizId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f", state: "ACTIVE", startedAt: null },
+      ],
+      question: {
+        quizId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f",
+        questionId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8a",
+        position: 1,
+        prompt: "Capital of Germany?",
+        firstCorrectWins: true,
+        state: "PUBLISHED",
+        acceptingAnswers: true,
+      },
+      ownAnswer: null,
+      standings: [],
+    };
+    expect(recoverySnapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(
+      recoverySnapshotSchema.safeParse({
+        ...snapshot,
+        question: { ...snapshot.question, state: "DRAFT" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("sessionJoinedPayloadSchema requires the recovery field (shape clients can rely on)", () => {
+    const base = {
+      sessionId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f",
+      state: "LIVE",
+      participantId: null,
+      role: null,
+      displayName: null,
+    };
+    expect(sessionJoinedPayloadSchema.safeParse({ ...base, recovery: null }).success).toBe(true);
+    expect(sessionJoinedPayloadSchema.safeParse(base).success).toBe(false);
   });
 });

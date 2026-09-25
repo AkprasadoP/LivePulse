@@ -1,10 +1,11 @@
-# LivePulse WebSocket Protocol — Phase 2 + Phase 3
+# LivePulse WebSocket Protocol — Phase 2 + 3 + 5
 
-> Scope: the protocol actually implemented through Phase 3 (live quiz
-> execution). It is **not** immutable — later phases add events (doubts,
+> Scope: the protocol actually implemented through Phase 5 (reconnect &
+> recovery). It is **not** immutable — later phases add events (doubts,
 > presence) and possibly new envelope fields. Additions must be
 > backward-compatible: clients should ignore server event types they do not
-> recognize.
+> recognize. Phase 5 added exactly one field (`session.joined.recovery`); no
+> event name, envelope shape or error code changed.
 
 ## 1. Endpoint
 
@@ -126,9 +127,76 @@ Server behavior, in order:
    join B** (ADR-003).
 5. If `participant` is present, resolve/create user + participant rows
    (race-safe find-or-create) and bind them to the connection.
-6. Register the connection in the in-memory registry; send `session.joined`
-   (now including the participant triple, `null` for view-only) and
-   `session.state`.
+6. Register the connection in the in-memory registry.
+7. Build the Phase 5 recovery snapshot from PostgreSQL (see §5.1.1) and send
+   `session.joined` — the participant triple (`null` for view-only) **plus
+   `recovery`** — followed by `session.state`.
+
+#### 5.1.1 Recovery snapshot (Phase 5)
+
+`session.joined` carries a `recovery` field: the authoritative state a
+reconnecting client needs, read from PostgreSQL during the join. It is
+**always present** — an object, or `null` when the session has no quizzes
+at all. It is a snapshot of what _is_, never a replay of what _changed_.
+
+```jsonc
+{
+  "recovery": {
+    "quizzes": [{ "quizId": "018e...", "state": "ACTIVE", "startedAt": "2026-..." }],
+    "question": {
+      // CURRENT published/closed question, else null
+      "quizId": "018e...",
+      "questionId": "018d...",
+      "position": 1,
+      "prompt": "Capital of Germany?",
+      "firstCorrectWins": true,
+      "state": "PUBLISHED", // "PUBLISHED" | "CLOSED" — never DRAFT
+      "acceptingAnswers": true,
+    },
+    "ownAnswer": {
+      // bound participant's stored attempt-1 verdict, else null
+      "questionId": "018d...",
+      "content": "Berlin",
+      "isCorrect": true,
+      "isWinner": true,
+      "attemptNumber": 1,
+      "submittedAt": "2026-...",
+    },
+    "standings": [
+      // current standings for `question` (see §6)
+      {
+        "participantId": "018a...",
+        "displayName": "Student-1",
+        "correctCount": 1,
+        "isWinner": true,
+      },
+    ],
+  },
+}
+```
+
+- `recovery` is built on **every** join: first join and reconnect are the
+  same server path. Reconnecting to a _different_ instance yields the same
+  snapshot because it is read from the shared PostgreSQL — never from
+  process memory or Redis.
+- `question` is the most recently transitioned `PUBLISHED`/`CLOSED` question
+  of the session (at most one is ever `PUBLISHED`, enforced by a DB index);
+  `DRAFT` questions never appear. `correctAnswer` never crosses the wire.
+- `ownAnswer` is the bound participant's stored attempt-1 verdict, including
+  the case where the answer committed but the client never received its
+  `answer.accepted`. It is always `null` for view-only joins.
+- Missed live events (`quiz.started`, `question.published`,
+  `answer.accepted`, `leaderboard.updated`, `question.closed`) are **not
+  replayed** — the snapshot reconciles the client to current state instead.
+- A snapshot build failure never fails the join: `recovery` degrades to
+  `null` (logged server-side) and the connection still joins.
+- Identity is the same development seam as §4: reconnect with the same
+  `displayName` binds to the same participant row, which is what makes
+  `ownAnswer` resolve. `displayName` is not a credential (documented
+  limitation; see `docs/architecture/recovery.md` §5).
+
+Full design, guarantees and limitations: `docs/architecture/recovery.md`,
+ADR-006; test evidence: `docs/testing/recovery.md`.
 
 ### 5.2 `session.leave`
 
@@ -262,6 +330,11 @@ was correct.
 | `leaderboard.updated` | on publish (empty), fresh answers, close   | echoed / `null`     |
 | `error`               | any failure                                | echoed / `null`     |
 
+`session.joined` payload (Phase 5): the participant triple + the `recovery`
+snapshot described in §5.1.1. `recovery` is always present (object or
+`null`). The snapshot is **not** an event: it is never broadcast and carries
+no replay of missed events.
+
 `leaderboard.updated` payload:
 
 ```json
@@ -298,6 +371,11 @@ kept anywhere else.
   drop) can simply resubmit: duplicate handling is idempotent (below), so a
   retry is safe. At-least-once frames + idempotent server = exactly-once
   _effect_.
+- **Reconnect (Phase 5).** After any disconnection the client re-sends
+  `session.join` — to any instance — and reconciles from
+  `session.joined.recovery` (§5.1.1). A resubmission after reconnect is the
+  same idempotent retry described here. Missed transient event frames are
+  **not replayed**; the snapshot carries the durable state they announced.
 - WebSocket delivery is at-least-once at best, and frames from one client are
   processed sequentially per connection; there is no cross-connection
   ordering guarantee.
@@ -327,7 +405,7 @@ holder. The database clock (lock order + commit), not the wall clock, decides.
 | `INVALID_SESSION_ID`             | `payload.sessionId` of `session.join` is not a UUID (rejected before any DB access).                                               |
 | `SESSION_NOT_FOUND`              | UUID well-formed but no such session in PostgreSQL.                                                                                |
 | `SESSION_ALREADY_JOINED`         | Connection re-joined the session it is already in.                                                                                 |
-| `UNSUPPORTED_EVENT`              | `type` is a valid string but not a known client event (e.g. `doubt.create` before Phase 5).                                        |
+| `UNSUPPORTED_EVENT`              | `type` is a valid string but not a known client event (e.g. `doubt.create`, a later phase).                                        |
 | `NOT_JOINED`                     | Participant-bound event sent before joining a session.                                                                             |
 | `NOT_A_PARTICIPANT`              | Event requires a bound participant but the join was view-only (or the binding was detached by leave).                              |
 | `TEACHER_REQUIRED`               | Teacher-only event sent by a `STUDENT` participant.                                                                                |
@@ -361,7 +439,7 @@ Rules:
 
 ```
 C → S: {"type":"session.join","requestId":"r1","payload":{"sessionId":"018f...","participant":{"displayName":"Ms. Ray"}}}
-S → C: {"type":"session.joined","requestId":"r1","payload":{"sessionId":"018f...","state":"LIVE","participantId":"0189...","role":"TEACHER","displayName":"Ms. Ray"}}
+S → C: {"type":"session.joined","requestId":"r1","payload":{"sessionId":"018f...","state":"LIVE","participantId":"0189...","role":"TEACHER","displayName":"Ms. Ray","recovery":null}}
 S → C: {"type":"session.state","requestId":"r1","payload":{"sessionId":"018f...","state":"LIVE",...}}
 
 C → S: {"type":"quiz.start","requestId":"q1","payload":{"quizId":"018e..."}}

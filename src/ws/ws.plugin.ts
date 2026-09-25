@@ -297,6 +297,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       quizRepository,
       answerRepository,
       participantRepository,
+      prisma: app.prisma,
       log,
       distributor,
     });

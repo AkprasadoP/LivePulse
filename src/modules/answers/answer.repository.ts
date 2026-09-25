@@ -74,13 +74,15 @@ export class AnswerRepository {
         //    (attemptNumber 1 in this phase) means the retry arrived after a
         //    committed first submission. Idempotent-replay: return the stored
         //    answer with its original verdict instead of a constraint error.
+        //    A duplicate is ALWAYS `duplicate`, even when the stored answer is
+        //    the winner: the caller replays the private verdict but must not
+        //    re-broadcast, or a retry of the winning answer would re-rank the
+        //    session (Phase 3 "broadcast once" contract).
         const previous = await tx.answer.findFirst({
           where: { questionId: question.id, participantId, attemptNumber: 1 },
         });
         if (previous) {
-          const outcome =
-            previous.isWinner === true ? ("accepted-winner" as const) : ("duplicate" as const);
-          return { outcome, answer: previous };
+          return { outcome: "duplicate" as const, answer: previous };
         }
 
         // 4. Correctness is decided by the SERVER against the stored key.

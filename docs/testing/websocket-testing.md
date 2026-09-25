@@ -71,11 +71,12 @@ pnpm db:test:setup  # one-time: create/migrate livepulse_test
 pnpm test:integration
 ```
 
-## Not covered yet (deliberate)
+## Not covered here (covered elsewhere / later)
 
-- Reconnect/recovery semantics (Phase 7).
-- Dockerized multi-instance behavior (Phase 6) — cross-instance distribution
-  is already covered by `distributed.test.ts` with two independent
-  in-process instances; containerized instances + Nginx arrive in Phase 6.
-- Load/backpressure behavior (Phase 10, k6).
+- Reconnect/recovery semantics — covered by `docs/testing/recovery.md`
+  (`tests/integration/recovery.test.ts`).
+- Dockerized multi-instance behavior — cross-instance distribution is
+  already covered by `distributed.test.ts` with two independent in-process
+  instances; containerized instances + Nginx arrive in a later phase.
+- Load/backpressure behavior (k6, later phase).
 - Authentication on the upgrade path (auth phase).

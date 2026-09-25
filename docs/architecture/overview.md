@@ -1,17 +1,16 @@
 # LivePulse — Architecture Overview
 
-> **Status: Phase 4 — Distributed WebSockets (Redis Pub/Sub distribution).**
+> **Status: Phase 5 — Reconnect & Recovery (PostgreSQL snapshot on rejoin).**
 > This document describes ONLY what is actually implemented. Presence
-> broadcasting, reconnect/recovery, doubt-queue semantics, Prometheus/Grafana
-> and Nginx are _not implemented_ and are listed as such. Per AGENT.md: never
-> document future-state as current-state.
+> broadcasting, doubt-queue semantics, Prometheus/Grafana and Nginx are _not
+> implemented_ and are listed as such. Per AGENT.md: never document
+> future-state as current-state.
 >
-> **Phase 4 is implemented:** inter-instance event distribution via Redis
-> Pub/Sub (post-commit notices only — PostgreSQL stays the sole source of
-> truth, winner election stays in the database). See
-> `docs/architecture/distributed-websockets.md` and ADR-005. Dockerized
-> multi-instance compose, reconnect snapshots and failure drills remain
-> deferred (Phases 6/7/11).
+> **Phases 4 and 5 are implemented:** inter-instance event distribution via
+> Redis Pub/Sub (post-commit notices only — PostgreSQL stays the sole source
+> of truth, winner election stays in the database; ADR-005) and reconnect
+> recovery via a PostgreSQL snapshot returned in `session.joined` (ADR-006).
+> Dockerized multi-instance compose and failure drills remain deferred.
 
 ## 1. Current architecture (as implemented)
 
@@ -30,6 +29,9 @@ Fastify server (TypeScript, ESM)
    ├── GET  /ws (plain HTTP)               → 426 Upgrade Required
    ├── WebSocket upgrade /ws               → raw `ws`, upgrade-routed on the SAME HTTP server
    │     session.join (+ optional participant identity seam) / session.leave
+   │       → session.joined carries the Phase 5 recovery snapshot (ADR-006):
+   │         quizzes/question/ownAnswer/standings read from PostgreSQL —
+   │         convergence on reconnect, NOT event replay
    │     quiz.start / question.publish / question.close (TEACHER-guarded, WS-only)
    │     quiz.answer → atomic persist + first-correct-wins election (ADR-004)
    │     server events: quiz.started, question.published, question.closed,
@@ -68,36 +70,37 @@ multi-instance compose** — that arrives in Phase 6.
 
 ## 2. Component inventory
 
-| Component                                             | Status | Notes                                                                            |
-| ----------------------------------------------------- | ------ | -------------------------------------------------------------------------------- |
-| TypeScript (strict) + Node ESM                        | ✅     |                                                                                  |
-| Fastify HTTP server + graceful shutdown               | ✅     | `src/app/app.ts`, `src/server.ts`                                                |
-| Health endpoint (liveness only)                       | ✅     | does NOT probe PG/Redis by design                                                |     | Zod env configuration, fail-fast | ✅  | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`, `INSTANCE_ID`, `DISTRIBUTION_ENABLED` |
-| Pino structured logging                               | ✅     | pretty transport in development                                                  |
-| Domain schema (7 entities, 5 enums)                   | ✅     | `prisma/schema.prisma`, ADR-002                                                  |
-| Migrations                                            | ✅     | `20260922090904_init_domain` applied to dev + test DBs                           |
-| Session state machine                                 | ✅     | `CREATED→LIVE→ENDED` (+`CREATED→ENDED`), atomic conditional UPDATE; race-tested  |
-| Data-access layer                                     | ✅     | `SessionRepository`, `QuizRepository` — small, domain-specific                   |
-| HTTP API (sessions, quizzes)                          | ✅     | documented in `docs/api/http-api.md`                                             |
-| Zod request validation + UUID param guards            | ✅     | malformed IDs never reach the DB                                                 |
-| WebSocket server (raw `ws`) on the shared HTTP server | ✅     | `src/ws/`; upgrade routing, 64 KiB frame cap, 426 for plain HTTP `/ws`           |
-| WS protocol (envelope + Zod schemas + error codes)    | ✅     | documented in `docs/api/websocket-protocol.md`                                   |
-| `session.join` / `session.leave` / state push         | ✅     | reads session state from PostgreSQL; no participants created                     |
-| In-memory SessionRegistry (ephemeral)                 | ✅     | `sessionId → Set<Connection>`; connection-keyed, no dedup (by design)            |
-| Heartbeat liveness (ping/pong + sweep)                | ✅     | one missed pong ⇒ terminate; default 30 s                                        |
-| WS integration tests over real sockets                | ✅     | 45 tests: lifecycle, protocol, session behavior, heartbeat, shutdown             |
-| Integration tests vs real PostgreSQL                  | ✅     | 91 total incl. WS + distribution (API flows, DB constraints, quiz flow, races)   |
-| Quiz/question lifecycle transitions (WS, teacher)     | ✅     | `quiz.start` / `question.publish` / `question.close`; one-open-question DB index |
-| Identity seam (displayName → user + participant)      | ✅     | Phase 3, temporary until auth; unique displayName, race-safe find-or-create      |
-| Answer submission + first-correct-wins election       | ✅     | ADR-004: FOR NO KEY UPDATE + partial unique index; duplicates replay verdicts    |
-| Leaderboard (per question, derived from answers)      | ✅     | `leaderboard.updated` broadcasts; no ranking state cached                        |
-| Concurrency tests (10/50/100 + mixed races)           | ✅     | exactly one winner on every run — `docs/testing/concurrency.md`                  |
-| Redis Pub/Sub distribution (post-commit notices)      | ✅     | ADR-005: global channel, echo-suppressed, at-most-once; degraded mode w/o Redis  |
-| Cross-instance integration tests (2 real instances)   | ✅     | `distributed.test.ts`: A–E + cross-instance 20-way race + shutdown regression    |
-| Dockerized multi-instance compose (2 app containers)  | ❌     | Phase 6 (tests spawn independent in-process instances today)                     |
-| Presence broadcasting, reconnect/recovery             | ❌     | later phases (7)                                                                 |
-| Presence/doubt-queue Redis structures                 | ❌     | Phases 5–8                                                                       |
-| Nginx, Prometheus, Grafana, k6                        | ❌     | deliberately deferred (§16, §18)                                                 |
+| Component                                             | Status | Notes                                                                                   |
+| ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------- |
+| TypeScript (strict) + Node ESM                        | ✅     |                                                                                         |
+| Fastify HTTP server + graceful shutdown               | ✅     | `src/app/app.ts`, `src/server.ts`                                                       |
+| Health endpoint (liveness only)                       | ✅     | does NOT probe PG/Redis by design                                                       |     | Zod env configuration, fail-fast | ✅  | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`, `INSTANCE_ID`, `DISTRIBUTION_ENABLED` |
+| Pino structured logging                               | ✅     | pretty transport in development                                                         |
+| Domain schema (7 entities, 5 enums)                   | ✅     | `prisma/schema.prisma`, ADR-002                                                         |
+| Migrations                                            | ✅     | `20260922090904_init_domain` applied to dev + test DBs                                  |
+| Session state machine                                 | ✅     | `CREATED→LIVE→ENDED` (+`CREATED→ENDED`), atomic conditional UPDATE; race-tested         |
+| Data-access layer                                     | ✅     | `SessionRepository`, `QuizRepository` — small, domain-specific                          |
+| HTTP API (sessions, quizzes)                          | ✅     | documented in `docs/api/http-api.md`                                                    |
+| Zod request validation + UUID param guards            | ✅     | malformed IDs never reach the DB                                                        |
+| WebSocket server (raw `ws`) on the shared HTTP server | ✅     | `src/ws/`; upgrade routing, 64 KiB frame cap, 426 for plain HTTP `/ws`                  |
+| WS protocol (envelope + Zod schemas + error codes)    | ✅     | documented in `docs/api/websocket-protocol.md`                                          |
+| `session.join` / `session.leave` / state push         | ✅     | reads session state from PostgreSQL; participant binding + recovery snapshot            |
+| In-memory SessionRegistry (ephemeral)                 | ✅     | `sessionId → Set<Connection>`; connection-keyed, no dedup (by design)                   |
+| Heartbeat liveness (ping/pong + sweep)                | ✅     | one missed pong ⇒ terminate; default 30 s                                               |
+| WS integration tests over real sockets                | ✅     | 45 tests: lifecycle, protocol, session behavior, heartbeat, shutdown                    |
+| Integration tests vs real PostgreSQL                  | ✅     | 91 total incl. WS + distribution (API flows, DB constraints, quiz flow, races)          |
+| Quiz/question lifecycle transitions (WS, teacher)     | ✅     | `quiz.start` / `question.publish` / `question.close`; one-open-question DB index        |
+| Identity seam (displayName → user + participant)      | ✅     | Phase 3, temporary until auth; unique displayName, race-safe find-or-create             |
+| Answer submission + first-correct-wins election       | ✅     | ADR-004: FOR NO KEY UPDATE + partial unique index; duplicates replay verdicts           |
+| Leaderboard (per question, derived from answers)      | ✅     | `leaderboard.updated` broadcasts; no ranking state cached                               |
+| Concurrency tests (10/50/100 + mixed races)           | ✅     | exactly one winner on every run — `docs/testing/concurrency.md`                         |
+| Redis Pub/Sub distribution (post-commit notices)      | ✅     | ADR-005: global channel, echo-suppressed, at-most-once; degraded mode w/o Redis         |
+| Cross-instance integration tests (2 real instances)   | ✅     | `distributed.test.ts`: A–E + cross-instance 20-way race + shutdown regression           |
+| Reconnect recovery (`session.joined.recovery`)        | ✅     | ADR-006: PostgreSQL snapshot at join; instance-agnostic; no replay (`recovery.test.ts`) |
+| Dockerized multi-instance compose (2 app containers)  | ❌     | later phase (tests spawn independent in-process instances today)                        |
+| Presence broadcasting                                 | ❌     | later phase                                                                             |
+| Presence/doubt-queue Redis structures                 | ❌     | later phases                                                                            |
+| Nginx, Prometheus, Grafana, k6                        | ❌     | deliberately deferred (§16, §18)                                                        |
 
 ## 3. Repository layout (Phase 2 additions highlighted)
 
@@ -123,6 +126,7 @@ src/
 │   ├── protocol.ts           envelope + event Zod schemas, message factories
 │   ├── handlers.ts           session.join/leave, guards, error mapping, dispatch
 │   ├── quiz-handlers.ts      quiz.start/publish/close + quiz.answer + broadcasts (Phase 3)
+│   ├── recovery.ts           Phase 5: PostgreSQL recovery snapshot for session.join (ADR-006)
 │   ├── distribution.ts       Phase 4: event envelope, uuidv7 ids, publisher, receive path
 │   ├── session-registry.ts   sessionId → Set<Connection> (ephemeral)
 │   ├── connection.ts         per-socket state record (+ participant binding, Phase 3)
@@ -137,9 +141,11 @@ tests/
                               helpers: startListeningServer, WsTestClient, waitFor
 docs/
 ├── architecture/             overview.md, websocket-architecture.md,
-│                             distributed-websockets.md (Phase 4 design + implementation)
-├── decisions/                ADR-001…005 (foundation, domain, WS foundation,
-│                             first-correct-answer, Redis Pub/Sub boundary)
+│                             distributed-websockets.md (Phase 4 design + implementation),
+│                             recovery.md (Phase 5 design + contract)
+├── decisions/                ADR-001…006 (foundation, domain, WS foundation,
+│                             first-correct-answer, Redis Pub/Sub boundary,
+│                             reconnect recovery)
 ├── api/                      http-api.md, websocket-protocol.md
 ├── database/schema.md        entities, states, constraints, indexes
 └── testing/websocket-testing.md
@@ -186,18 +192,23 @@ load-tests/                   (empty until Phase 10)
   and WS `{ type: "error", requestId, payload: { code, message, details } }`,
   each from one central mapper. WS errors never expose internals.
 - **Fail-fast configuration** and **real-env-wins `.env` loading**.
+- **Reconnect is reconciliation, not replay** (ADR-006): every `session.join`
+  returns a `recovery` snapshot read from PostgreSQL (session quizzes, the
+  current published/closed question, the bound participant's stored verdict,
+  current standings). Missed transient events are never replayed. The
+  snapshot is instance-agnostic (any instance serves the same one), never
+  touches Redis, and never becomes a second source of truth.
 - **Non-conflicting local ports:** PostgreSQL 5433, Redis 6380 (host).
 
 ## 5. Deferred-by-design (not "missing")
 
-1. Redis beyond Pub/Sub notices: presence, live doubt queue (Phases 5–8) —
+1. Redis beyond Pub/Sub notices: presence, live doubt queue (later phases) —
    the election deliberately stays in PostgreSQL so Redis never needs to own it
-2. Dockerized multi-instance + Nginx (Phase 6), reconnect/recovery protocol
-   (Phase 7) — cross-instance delivery is proven with independent in-process
-   instances until compose grows app services
-3. WS backpressure tuning (measured in Phase 10, not guessed)
-4. Prometheus/Grafana `/metrics` (Phase 9), k6 load tests (Phase 10),
-   failure drills (Phase 11)
+2. Dockerized multi-instance + Nginx — cross-instance delivery and
+   reconnect-to-another-instance recovery are proven with independent
+   in-process instances until compose grows app services
+3. WS backpressure tuning (measured, not guessed)
+4. Prometheus/Grafana `/metrics`, k6 load tests, failure drills
 5. Quiz `ACTIVE → COMPLETED` transition (modeled; not exposed — questions
    are the fine-grained surface for now)
 

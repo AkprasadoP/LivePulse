@@ -1,9 +1,10 @@
-# WebSocket Architecture — Phase 2 + Phase 3 (Single Instance)
+# WebSocket Architecture — Single Instance (Phases 2–3 mechanics)
 
-> Scope: what is actually implemented through Phase 3 (live quiz
-> execution). Redis Pub/Sub, multiple WebSocket instances, presence
-> broadcasting, and reconnect/recovery are **future architecture**
-> (AGENT.md Phases 5–7) and are marked as such.
+> Scope: the connection/transport mechanics of the WebSocket layer as built
+> in Phases 2–3. Redis Pub/Sub distribution (Phase 4) and reconnect/recovery
+> (Phase 5) are **implemented** and documented separately
+> (`distributed-websockets.md`, `recovery.md`); this document focuses on the
+> per-instance layer they build on. Presence broadcasting remains future work.
 
 ## 1. Topology
 
@@ -124,7 +125,8 @@ quiz and question state machines are never duplicated in memory.
 
 This detects OS-level/half-open dead peers (crashed laptops, dropped NAT
 entries) that clean TCP closes never report. It does **not** solve
-application-level reconnect/recovery — that is Phase 7.
+application-level reconnect/recovery — that is handled at the join layer
+(`session.joined.recovery`, Phase 5 / ADR-006; see `recovery.md`).
 
 ## 6. Session association rules
 
@@ -190,15 +192,18 @@ contents, never connection strings or future credentials:
 
 ## 8. What is deliberately NOT here (future architecture)
 
-- **Redis Pub/Sub / multi-instance fan-out** — Phase 5–6. This registry is
-  process-local; a second instance would not see its sessions. (The answer
-  election was deliberately placed in PostgreSQL so this phase does not
-  need to move it — ADR-004.)
+- **Redis Pub/Sub / multi-instance fan-out** — implemented in Phase 4
+  (ADR-005, `distributed-websockets.md`). This registry stays process-local;
+  cross-instance delivery goes through Redis notices, not registry sharing.
+  (The answer election was deliberately placed in PostgreSQL so it did not
+  need to move — ADR-004.)
 - **Presence broadcasting** — later phase. The registry knows who is
   connected (and now who the participants are); announcing it to everyone is
   a later, deliberate step.
-- **Reconnect/recovery** — Phase 7. A dropped socket loses nothing durable
-  (nothing was written), but there is no resume/session-replay protocol yet.
+- **Reconnect/recovery** — implemented in Phase 5 (ADR-006) via a PostgreSQL
+  snapshot in `session.joined`; see `docs/architecture/recovery.md`. A
+  dropped socket loses nothing durable, and reconnecting clients converge to
+  authoritative state (missed event frames are not replayed).
 - **Backpressure strategy** — `ws` buffers sends; at Phase 10 (load testing)
   we will measure and decide between per-socket bufferedAmount limits,
   draining, or disconnect policies. No premature tuning.

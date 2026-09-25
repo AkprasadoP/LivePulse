@@ -1,11 +1,13 @@
 import type { Connection } from "./connection.js";
 import type { SessionRegistry } from "./session-registry.js";
+import type { PrismaClient } from "@prisma/client";
 import { SessionRepository } from "../modules/sessions/session.repository.js";
 import { QuizRepository } from "../modules/quizzes/quiz.repository.js";
 import { AnswerRepository } from "../modules/answers/answer.repository.js";
 import { ParticipantRepository } from "../modules/participants/participant.repository.js";
 import { NotFoundError, InvalidStateTransitionError } from "../shared/errors.js";
 import { sessionJoinedMessage, sessionStateMessage } from "./protocol.js";
+import { buildRecoverySnapshot, type RecoverySnapshot } from "./recovery.js";
 import {
   clientEventSchemas,
   errorMessage,
@@ -35,6 +37,8 @@ export interface HandlerDependencies {
   quizRepository: QuizRepository;
   answerRepository: AnswerRepository;
   participantRepository: ParticipantRepository;
+  /** Phase 5: recovery snapshots read PostgreSQL through the shared client. */
+  prisma: PrismaClient;
   log: HandlerLog;
   /**
    * Phase 4 distribution (optional so unit-ish usages stay simple): used by
@@ -329,6 +333,33 @@ async function handleSessionJoin(
     "WebSocket session joined",
   );
 
+  // Phase 5 recovery snapshot (ADR-006): assembled from PostgreSQL on EVERY
+  // join (first join and reconnect are the same code path — reconnect is not
+  // a distinct server-side concept). Failure is non-fatal by design: a
+  // broken recovery path degrades to `recovery: null`, it never breaks the
+  // join itself.
+  let recovery: RecoverySnapshot | null = null;
+  try {
+    recovery = await buildRecoverySnapshot(
+      { prisma: deps.prisma, answerRepository: deps.answerRepository },
+      payload.sessionId,
+      participant?.id ?? null,
+    );
+    deps.log.info(
+      {
+        sessionId: payload.sessionId,
+        participantId: participant?.id ?? null,
+        recovered: recovery !== null && (recovery.question !== null || recovery.ownAnswer !== null),
+      },
+      "Recovery snapshot built",
+    );
+  } catch (error) {
+    deps.log.warn(
+      { err: error instanceof Error ? error.message : String(error), sessionId: payload.sessionId },
+      "Recovery snapshot failed (joining continues without recovery data)",
+    );
+  }
+
   send(
     connection,
     sessionJoinedMessage(requestId, {
@@ -337,6 +368,7 @@ async function handleSessionJoin(
       participantId: participant?.id ?? null,
       role: participant?.role ?? null,
       displayName: participant?.displayName ?? null,
+      recovery,
     }),
     deps.log,
   );

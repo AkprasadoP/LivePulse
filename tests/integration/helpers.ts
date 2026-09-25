@@ -328,12 +328,23 @@ export async function createLiveQuizScenario(
   };
 }
 
-/** Join a session over WS (optionally binding a participant) and await the ack. */
+/**
+ * Join a session over WS (optionally binding a participant) and await the ack.
+ * Returns the full session.joined payload; `recovery` is the Phase 5 snapshot
+ * (null when the session has no quizzes yet). Consumes exactly one
+ * session.joined frame, so callers can drain afterwards and assert that no
+ * duplicate join frames arrived.
+ */
 export async function joinAs(
   client: WsTestClient,
   sessionId: string,
   displayName?: string,
-): Promise<{ participantId: string | null; role: string | null; state: string }> {
+): Promise<{
+  participantId: string | null;
+  role: string | null;
+  state: string;
+  recovery: unknown;
+}> {
   const requestId = `join-${++joinCounter}`;
   client.send({
     type: "session.join",
@@ -350,8 +361,14 @@ export async function joinAs(
     participantId: string | null;
     role: string | null;
     state: string;
+    recovery: unknown;
   };
-  return { participantId: payload.participantId, role: payload.role, state: payload.state };
+  return {
+    participantId: payload.participantId,
+    role: payload.role,
+    state: payload.state,
+    recovery: payload.recovery,
+  };
 }
 
 // ---------------------------------------------------------------------------

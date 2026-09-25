@@ -104,6 +104,60 @@ export function requiresParticipant(type: ClientEventType): boolean {
 // Server events
 // ---------------------------------------------------------------------------
 
+export const leaderboardEntrySchema = z.object({
+  participantId: z.uuid(),
+  displayName: z.string(),
+  correctCount: z.number().int(),
+  isWinner: z.boolean(),
+});
+
+/**
+ * Phase 5 recovery snapshot — one entry per quiz of the session.
+ * Distinct from quizStartedPayloadSchema: a snapshot describes persisted
+ * state (id + state + timestamps), not an event that just happened.
+ */
+export const recoveryQuizSchema = z.object({
+  quizId: z.uuid(),
+  state: z.enum(["DRAFT", "ACTIVE", "COMPLETED"]),
+  startedAt: z.string().datetime().nullable(),
+});
+
+/** The CURRENT published/closed question (never DRAFT), or null. */
+export const recoveryQuestionSchema = z.object({
+  quizId: z.uuid(),
+  questionId: z.uuid(),
+  position: z.number().int(),
+  prompt: z.string(),
+  /** Absent from student-visible payloads; always null over the wire. */
+  firstCorrectWins: z.boolean(),
+  state: z.enum(["PUBLISHED", "CLOSED"]),
+  /** true iff state === "PUBLISHED" (mirrors question.published semantics). */
+  acceptingAnswers: z.boolean(),
+});
+
+/** The bound participant's stored attempt-1 verdict, or null. */
+export const recoveryOwnAnswerSchema = z.object({
+  questionId: z.uuid(),
+  content: z.string(),
+  isCorrect: z.boolean().nullable(),
+  isWinner: z.boolean(),
+  attemptNumber: z.number().int(),
+  submittedAt: z.string().datetime(),
+});
+
+/**
+ * Phase 5 session recovery snapshot (ADR-006): the authoritative state a
+ * reconnecting client needs, read from PostgreSQL at join time. NOT a
+ * replay of missed events — the snapshot says what IS, not what changed.
+ * `null` when the session has no quizzes yet.
+ */
+export const recoverySnapshotSchema = z.object({
+  quizzes: z.array(recoveryQuizSchema),
+  question: recoveryQuestionSchema.nullable(),
+  ownAnswer: recoveryOwnAnswerSchema.nullable(),
+  standings: z.array(leaderboardEntrySchema),
+});
+
 export const sessionJoinedPayloadSchema = z.object({
   sessionId: z.uuid(),
   state: z.enum(["CREATED", "LIVE", "ENDED"]),
@@ -111,6 +165,11 @@ export const sessionJoinedPayloadSchema = z.object({
   participantId: z.uuid().nullable(),
   role: z.enum(["TEACHER", "STUDENT"]).nullable(),
   displayName: z.string().nullable(),
+  /**
+   * Phase 5: authoritative snapshot for reconnecting clients. Always present
+   * on the payload; null only when the session has no quizzes at all.
+   */
+  recovery: recoverySnapshotSchema.nullable(),
 });
 
 export const sessionStatePayloadSchema = z.object({
@@ -162,16 +221,11 @@ export const answerRejectedPayloadSchema = z.object({
   reason: z.enum(["not_accepting_answers", "not_a_participant"]),
 });
 
-export const leaderboardEntrySchema = z.object({
-  participantId: z.uuid(),
-  displayName: z.string(),
-  correctCount: z.number().int(),
-  isWinner: z.boolean(),
-});
-
 export const leaderboardUpdatedPayloadSchema = z.object({
   sessionId: z.uuid(),
   questionId: z.uuid(),
+  // Reuses leaderboardEntrySchema (declared above, shared with the Phase 5
+  // recovery snapshot) so standings have exactly one wire shape.
   standings: z.array(leaderboardEntrySchema),
 });
 
