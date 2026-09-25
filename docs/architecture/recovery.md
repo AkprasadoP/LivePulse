@@ -241,6 +241,22 @@ normal live events resume (local broadcast + Redis Pub/Sub fan-out)
       // current derived standings for recovery.question
       { "participantId": "018a…", "displayName": "Student-1", "correctCount": 1, "isWinner": true },
     ],
+    "doubts": {
+      // Phase 6: the OPEN queue in canonical order (see doubt-queue.md)
+      "open": [
+        {
+          "doubtId": "018c…",
+          "participantId": "018a…",
+          "displayName": "Student-1",
+          "content": "Why is the sky blue?",
+          "priority": 0,
+          "enqueueSeq": 1,
+          "status": "OPEN",
+          "createdAt": "…",
+        },
+      ],
+      "truncated": false, // true when OPEN doubts exceed the 100-doubt payload cap
+    },
   },
 }
 ```
@@ -258,11 +274,15 @@ Guarantees of the snapshot (each enforced by a test):
    lost-`answer.accepted` case.
 4. **standings:** the same derivation the close broadcast uses, computed
    fresh; `[]` when no question section exists or nothing is scored.
-5. **`recovery: null`** when the session has no quizzes at all — the field
-   is always present on the payload so clients can rely on its shape.
-6. **Idempotent:** joining twice on separate connections yields the same
+5. **`recovery: null`** when the session has neither quizzes nor open doubts
+   — the field is always present on the payload so clients can rely on its
+   shape. (A doubt-only session still gets a snapshot.)
+6. **Doubts (Phase 6):** `recovery.doubts.open` is the session's OPEN doubt
+   queue in canonical order `(priority DESC, enqueueSeq ASC)`, capped at 100
+   as a payload bound (never capacity — PostgreSQL keeps every row).
+7. **Idempotent:** joining twice on separate connections yields the same
    snapshot (it is a pure read).
-7. **Not a diff:** the snapshot says nothing about _what changed_ while the
+8. **Not a diff:** the snapshot says nothing about _what changed_ while the
    client was away. Clients that need change history do not get it here.
 
 View-only joins (no `participant`) get the same `recovery` object minus

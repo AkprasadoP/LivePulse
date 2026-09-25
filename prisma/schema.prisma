@@ -38,6 +38,7 @@ enum QuestionState {
 enum DoubtStatus {
   OPEN
   RESOLVED
+  DISMISSED
 }
 
 /// Global identity. No credentials yet (authentication is a later phase).
@@ -63,6 +64,10 @@ model Session {
   name      String       @db.VarChar(200)
   state     SessionState @default(CREATED)
   creatorId String
+  /// Per-session doubt enqueue counter (Phase 6). Locked and incremented in
+  /// the same transaction that inserts a doubt, so doubt.enqueueSeq order ==
+  /// durable acceptance (commit) order. Server-owned; never client-set.
+  doubtSeq  Int          @default(0)
   startedAt DateTime?    @db.Timestamptz(6)
   endedAt   DateTime?    @db.Timestamptz(6)
   createdAt DateTime     @default(now()) @db.Timestamptz(6)
@@ -165,25 +170,38 @@ model Answer {
   @@map("answers")
 }
 
-/// Durable record of a doubt raised in a session. The live queue ordering
-/// will live in Redis in a later phase; this index already matches the
-/// documented queue query (priority DESC, createdAt ASC within open doubts).
+/// Durable record of a doubt raised in a session (Phase 6 queue).
+///
+/// The queue IS PostgreSQL — Redis is notification only (ADR-007). Ordering
+/// is by (priority DESC, enqueueSeq ASC) over OPEN rows: enqueueSeq is a
+/// per-session monotonically increasing integer assigned by PostgreSQL inside
+/// the inserting transaction while holding the session row lock, so sequence
+/// order equals durable acceptance (commit) order. It is never client-set.
+///
+/// `doubtRequestId` is an optional client idempotency key: a retried create
+/// with the same key resolves to the existing row (checked in-transaction).
 model Doubt {
-  id            String      @id @default(uuid(7))
-  sessionId     String
-  participantId String
-  content       String      @db.Text
-  priority      Int         @default(0)
-  status        DoubtStatus @default(OPEN)
-  resolvedAt    DateTime?   @db.Timestamptz(6)
-  createdAt     DateTime    @default(now()) @db.Timestamptz(6)
-  updatedAt     DateTime    @updatedAt @db.Timestamptz(6)
+  id             String      @id @default(uuid(7))
+  sessionId      String
+  participantId  String
+  content        String      @db.Text
+  priority       Int         @default(0)
+  /// Per-session queue sequence — the ordering authority (server-assigned).
+  enqueueSeq     Int
+  /// Optional client idempotency key (partial unique index in the migration).
+  doubtRequestId String?     @db.VarChar(64)
+  status         DoubtStatus @default(OPEN)
+  resolvedAt     DateTime?   @db.Timestamptz(6)
+  createdAt      DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime    @updatedAt @db.Timestamptz(6)
 
   session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   participant SessionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
 
-  @@index([sessionId, status, priority(sort: Desc), createdAt(sort: Asc)])
+  /// The queue read: OPEN doubts of a session in canonical order.
+  @@index([sessionId, status, priority(sort: Desc), enqueueSeq(sort: Asc)])
+  @@unique([sessionId, enqueueSeq])
   @@index([participantId])
   @@map("doubts")
 }

@@ -129,7 +129,8 @@ describe("Database constraints (integration, real PostgreSQL)", () => {
       data: { questionId: question.id, participantId: participant.id, content: "will vanish" },
     });
     await ctx.prisma.doubt.create({
-      data: { sessionId, participantId: participant.id, content: "vanishing doubt" },
+      // enqueueSeq is the Phase 6 server-assigned ordering key.
+      data: { sessionId, participantId: participant.id, content: "vanishing doubt", enqueueSeq: 1 },
     });
 
     await ctx.prisma.session.delete({ where: { id: sessionId } });

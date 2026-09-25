@@ -1,16 +1,15 @@
 # LivePulse — Architecture Overview
 
-> **Status: Phase 5 — Reconnect & Recovery (PostgreSQL snapshot on rejoin).**
+> **Status: Phase 6 — Doubt Queue (PostgreSQL-enforced ordering).**
 > This document describes ONLY what is actually implemented. Presence
-> broadcasting, doubt-queue semantics, Prometheus/Grafana and Nginx are _not
-> implemented_ and are listed as such. Per AGENT.md: never document
-> future-state as current-state.
+> broadcasting, Prometheus/Grafana and Nginx are _not implemented_ and are
+> listed as such. Per AGENT.md: never document future-state as current-state.
 >
-> **Phases 4 and 5 are implemented:** inter-instance event distribution via
-> Redis Pub/Sub (post-commit notices only — PostgreSQL stays the sole source
-> of truth, winner election stays in the database; ADR-005) and reconnect
-> recovery via a PostgreSQL snapshot returned in `session.joined` (ADR-006).
-> Dockerized multi-instance compose and failure drills remain deferred.
+> **Phases 4–6 are implemented:** inter-instance distribution via Redis
+> Pub/Sub (post-commit notices only; ADR-005), reconnect recovery via a
+> PostgreSQL snapshot in `session.joined` (ADR-006), and the doubt queue with
+> server-assigned per-session ordering (ADR-007). Dockerized multi-instance
+> compose and failure drills remain deferred.
 
 ## 1. Current architecture (as implemented)
 
@@ -74,7 +73,7 @@ multi-instance compose** — that arrives in Phase 6.
 | ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------- |
 | TypeScript (strict) + Node ESM                        | ✅     |                                                                                         |
 | Fastify HTTP server + graceful shutdown               | ✅     | `src/app/app.ts`, `src/server.ts`                                                       |
-| Health endpoint (liveness only)                       | ✅     | does NOT probe PG/Redis by design                                                       |     | Zod env configuration, fail-fast | ✅  | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`, `INSTANCE_ID`, `DISTRIBUTION_ENABLED` |
+| Health endpoint (liveness only)                       | ✅     | does NOT probe PG/Redis by design                                                       |     | Zod env configuration, fail-fast                        | ✅  | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`, `INSTANCE_ID`, `DISTRIBUTION_ENABLED` |
 | Pino structured logging                               | ✅     | pretty transport in development                                                         |
 | Domain schema (7 entities, 5 enums)                   | ✅     | `prisma/schema.prisma`, ADR-002                                                         |
 | Migrations                                            | ✅     | `20260922090904_init_domain` applied to dev + test DBs                                  |
@@ -98,8 +97,8 @@ multi-instance compose** — that arrives in Phase 6.
 | Cross-instance integration tests (2 real instances)   | ✅     | `distributed.test.ts`: A–E + cross-instance 20-way race + shutdown regression           |
 | Reconnect recovery (`session.joined.recovery`)        | ✅     | ADR-006: PostgreSQL snapshot at join; instance-agnostic; no replay (`recovery.test.ts`) |
 | Dockerized multi-instance compose (2 app containers)  | ❌     | later phase (tests spawn independent in-process instances today)                        |
-| Presence broadcasting                                 | ❌     | later phase                                                                             |
-| Presence/doubt-queue Redis structures                 | ❌     | later phases                                                                            |
+| Presence broadcasting                                 | ❌     | later phase                                                                             |     | Doubt queue (`doubt.create/resolve/dismiss/queue.list`) | ✅  | ADR-007: `enqueueSeq` ordering in PostgreSQL; Redis notification-only                 |
+| Presence (Redis structures)                           | ❌     | later phase                                                                             |
 | Nginx, Prometheus, Grafana, k6                        | ❌     | deliberately deferred (§16, §18)                                                        |
 
 ## 3. Repository layout (Phase 2 additions highlighted)
@@ -119,6 +118,7 @@ src/
 │   ├── quizzes/…             repository, CAS state transitions, schemas   (Phases 1+3)
 │   ├── answers/…             AnswerRepository: atomic election transaction (Phase 3)
 │   ├── participants/…        ParticipantRepository: find-or-create seam   (Phase 3)
+│   ├── doubts/…              DoubtRepository: transactional queue accept + transitions (Phase 6)
 │   ├── users/…               UserRepository: find-or-create by displayName (Phase 3)
 │   └── index.ts
 ├── ws/                                                            (Phases 2+3)
@@ -127,6 +127,7 @@ src/
 │   ├── handlers.ts           session.join/leave, guards, error mapping, dispatch
 │   ├── quiz-handlers.ts      quiz.start/publish/close + quiz.answer + broadcasts (Phase 3)
 │   ├── recovery.ts           Phase 5: PostgreSQL recovery snapshot for session.join (ADR-006)
+│   ├── doubt-handlers.ts     Phase 6: doubt.create/resolve/dismiss/queue.list + broadcasts
 │   ├── distribution.ts       Phase 4: event envelope, uuidv7 ids, publisher, receive path
 │   ├── session-registry.ts   sessionId → Set<Connection> (ephemeral)
 │   ├── connection.ts         per-socket state record (+ participant binding, Phase 3)
@@ -192,6 +193,11 @@ load-tests/                   (empty until Phase 10)
   and WS `{ type: "error", requestId, payload: { code, message, details } }`,
   each from one central mapper. WS errors never expose internals.
 - **Fail-fast configuration** and **real-env-wins `.env` loading**.
+- **The doubt queue is PostgreSQL ordering, not a Redis structure** (ADR-007):
+  order is `(priority DESC, enqueueSeq ASC)` over OPEN doubts; `enqueueSeq` is
+  a per-session sequence assigned inside the accepting transaction under the
+  session row lock, so sequence order equals durable acceptance order. Clients
+  never set ordering fields; Redis only carries post-commit notices.
 - **Reconnect is reconciliation, not replay** (ADR-006): every `session.join`
   returns a `recovery` snapshot read from PostgreSQL (session quizzes, the
   current published/closed question, the bound participant's stored verdict,
@@ -202,8 +208,8 @@ load-tests/                   (empty until Phase 10)
 
 ## 5. Deferred-by-design (not "missing")
 
-1. Redis beyond Pub/Sub notices: presence, live doubt queue (later phases) —
-   the election deliberately stays in PostgreSQL so Redis never needs to own it
+1. Redis beyond Pub/Sub notices: presence (later phase) — the election and the
+   doubt queue deliberately live in PostgreSQL so Redis never owns truth
 2. Dockerized multi-instance + Nginx — cross-instance delivery and
    reconnect-to-another-instance recovery are proven with independent
    in-process instances until compose grows app services

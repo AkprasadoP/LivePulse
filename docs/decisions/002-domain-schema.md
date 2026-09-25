@@ -1,8 +1,10 @@
 # ADR-002: Domain Schema — Users, Participants, Session Lifecycle, Quizzes, Questions, Answers, Doubts
 
-- **Status:** Accepted (Phase 1)
+- **Status:** Accepted (Phase 1); partially **superseded** on doubt ordering by
+  ADR-007 (Phase 6)
 - **Date:** 2026-09-22
-- **Related:** ADR-001 (foundation), `docs/database/schema.md`
+- **Related:** ADR-001 (foundation), ADR-007 (doubt queue ordering),
+  `docs/database/schema.md`
 
 ## Context
 
@@ -13,8 +15,9 @@ recovery) reads and writes this model, so the invariants that PostgreSQL
 can enforce should be established now. There is no authentication yet, and
 the product will eventually require: explicit session lifecycle, ordered
 questions, multiple-attempt answers, first-correct-wins semantics, and a
-doubt queue whose _live_ ordering will live in Redis while PostgreSQL
-keeps the durable record.
+doubt queue. (This ADR originally assumed the live ordering would live in
+Redis; ADR-007 supersedes that — the ordering is PostgreSQL's
+`doubts.enqueueSeq`, and Redis is notification only.)
 
 Decisions supplied by the project owner for this phase:
 
@@ -58,9 +61,10 @@ CLOSED`) states are modeled but not yet driven by any endpoint.
 - **(b) append-style answers** with `attemptNumber` and
   `UNIQUE (questionId, participantId, attemptNumber)`.
 - **(b) no winner storage yet.**
-- **(b) doubts as a durable record** with a Phase-8-shaped index
-  (`(sessionId, status, priority DESC, createdAt ASC)`), no sequence
-  numbers yet.
+- **(b) doubts as a durable record** with an ordering-shaped index
+  (`(sessionId, status, priority DESC, createdAt ASC)`), no sequence numbers
+  yet. **(Superseded by ADR-007: Phase 6 added `doubts.enqueueSeq` and the
+  final index `(sessionId, status, priority DESC, enqueueSeq ASC)`.)**
 - UUID primary keys generated client-side as **UUIDv7**
   (`uuidv7()` from the `uuid` package): sortable by creation time, which
   later makes time-ordered queries and cursor pagination natural without
@@ -93,9 +97,12 @@ CLOSED`) states are modeled but not yet driven by any endpoint.
   Any of the Phase 4 candidates (Redis `SET NX`, partial unique index on
   a correct first attempt) can be adopted without breaking this schema.
 - **Doubts without sequence:** the live ordering contract (priority vs
-  FIFO vs tie-break) is a Phase 8 design problem; PostgreSQL only needs
-  to durably record doubts and their resolution. The index anticipates
-  the likely query without committing to the queue semantics.
+  FIFO vs tie-break) was left to the doubt-queue phase; PostgreSQL only needed
+  to durably record doubts and their resolution. The index anticipated the
+  likely query without committing to the queue semantics.
+  **(Resolved by ADR-007: `enqueueSeq` is assigned by PostgreSQL under the
+  session row lock; FIFO = ascending `enqueueSeq` among OPEN doubts within a
+  session.)**
 
 ## Trade-offs
 
@@ -131,8 +138,9 @@ product policy later).
 
 **Intentionally deferred:** database triggers for state transitions;
 `correctAnswer` secrecy enforcement at the API layer (Phase 3+);
-one-ACTIVE-quiz partial index; doubt sequence numbers; winner election
-mechanism; answer-content grading logic.
+one-ACTIVE-quiz partial index; winner election mechanism; answer-content
+grading logic. (Delivered since: winner election — ADR-004; doubt sequence
+numbers — ADR-007.)
 
 **Not immutable:** this schema will evolve through migrations as real
 requirements appear; the shape above is the smallest correct model for

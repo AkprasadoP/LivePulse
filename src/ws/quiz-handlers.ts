@@ -1,6 +1,6 @@
 import type { Connection } from "./connection.js";
 import type { HandlerDependencies } from "./handlers.js";
-import { send } from "./handlers.js";
+import { send, broadcast } from "./handlers.js";
 import { NotFoundError } from "../shared/errors.js";
 import {
   quizStartedMessage,
@@ -25,12 +25,6 @@ import {
  * All broadcasts go to every connection joined to the session via the
  * in-memory registry (single instance — ADR-003).
  */
-function broadcast(deps: HandlerDependencies, sessionId: string, message: ServerEnvelope): void {
-  for (const target of deps.registry.getConnectionsForSession(sessionId)) {
-    send(target, message, deps.log);
-  }
-}
-
 function requireJoined(connection: Connection): string | null {
   return connection.joinedSessionId === null ? null : connection.joinedSessionId;
 }

@@ -1,7 +1,14 @@
 import type { PrismaClient, Quiz, Question, Answer } from "@prisma/client";
 import { z } from "zod";
-import { recoverySnapshotSchema } from "./protocol.js";
+import { recoverySnapshotSchema, type DoubtView } from "./protocol.js";
 import type { AnswerRepository } from "../modules/answers/answer.repository.js";
+import type { DoubtRepository } from "../modules/doubts/doubt.repository.js";
+
+/**
+ * Payload cap for doubts inside a snapshot response. This bounds the join/list
+ * frame; it is NOT a queue capacity — PostgreSQL keeps and serves every row.
+ */
+export const DOUBT_SNAPSHOT_LIMIT = 100;
 
 /**
  * Phase 5 recovery snapshot builder (ADR-006).
@@ -60,22 +67,24 @@ function pickOwnAnswer(
 export interface RecoverySnapshotDeps {
   prisma: PrismaClient;
   answerRepository: AnswerRepository;
+  /** Phase 6: the OPEN doubt queue is part of the authoritative snapshot. */
+  doubtRepository: DoubtRepository;
 }
 
 /**
  * Read the snapshot for one session. `participantId` may be null (view-only
  * join): the snapshot is identical except `ownAnswer` is always null.
  *
- * Returns `null` when the session has no quizzes at all — there is then no
- * quiz/question/standings state to reconcile, and the join payload already
- * carries session state. `null` is the minimal, honest snapshot.
+ * Returns `null` when the session has nothing to reconcile — no quizzes AND no
+ * open doubts. A doubt-only session still gets a snapshot (empty quizzes
+ * section, populated doubts section). `null` is the minimal, honest snapshot.
  */
 export async function buildRecoverySnapshot(
   deps: RecoverySnapshotDeps,
   sessionId: string,
   participantId: string | null,
 ): Promise<RecoverySnapshot | null> {
-  const { prisma, answerRepository } = deps;
+  const { prisma, answerRepository, doubtRepository } = deps;
 
   // One query per concern; all reads. Quizzes include their questions so the
   // current-question selection happens in memory (sessions have a handful of
@@ -86,7 +95,15 @@ export async function buildRecoverySnapshot(
     include: { questions: { orderBy: { position: "asc" } } },
   });
 
-  if (quizzes.length === 0) return null;
+  // Phase 6: the OPEN queue is authoritative current state too. Read it with
+  // the canonical order and a payload cap; the count drives the truncation
+  // flag (rows are never deleted by the cap).
+  const [openDoubts, openDoubtCount] = await Promise.all([
+    doubtRepository.listOpen(sessionId, DOUBT_SNAPSHOT_LIMIT),
+    doubtRepository.countOpen(sessionId),
+  ]);
+
+  if (quizzes.length === 0 && openDoubtCount === 0) return null;
 
   // The current question, if any, drives both its section and the standings.
   const currentQuestion = pickCurrentQuestion(quizzes.flatMap((quiz) => quiz.questions));
@@ -127,5 +144,18 @@ export async function buildRecoverySnapshot(
           },
     ownAnswer,
     standings,
+    doubts: {
+      open: openDoubts.map((doubt): DoubtView => ({
+        doubtId: doubt.id,
+        participantId: doubt.participantId,
+        displayName: doubt.participant.user.displayName,
+        content: doubt.content,
+        priority: doubt.priority,
+        enqueueSeq: doubt.enqueueSeq,
+        status: doubt.status,
+        createdAt: doubt.createdAt.toISOString(),
+      })),
+      truncated: openDoubtCount > openDoubts.length,
+    },
   });
 }

@@ -12,8 +12,8 @@ WS protocol: `docs/api/websocket-protocol.md` · Schema:
 
 ## Current implementation status
 
-**Phase 5 — Reconnect & Recovery (PostgreSQL snapshot on rejoin)** (complete;
-Phases 1–4 retained beneath it):
+**Phase 6 — Doubt Queue (PostgreSQL-enforced ordering)** (complete; Phases 1–5
+retained beneath it):
 
 - Everything from Phases 1–2: typed Fastify HTTP server, fail-fast Zod
   config, Pino logging, graceful shutdown, liveness-only `/health`, the
@@ -40,7 +40,7 @@ Phases 1–4 retained beneath it):
   simultaneous correct answers (the 100 race repeated 3×) and a mixed
   correct/incorrect run — exactly one winner on every run
   (`docs/testing/concurrency.md`)
-- Vitest suites: 51 unit tests + 104 integration tests against real
+- Vitest suites: 55 unit tests + 117 integration tests against real
   PostgreSQL, real Redis and real WebSocket clients
 - **Phase 4 — distributed WebSockets (implemented)**: inter-instance event
   distribution over Redis Pub/Sub, strictly as post-commit event notices on a
@@ -66,13 +66,28 @@ Phases 1–4 retained beneath it):
   stops, reconnect to WS-B, recover, continue" criterion
   (`tests/integration/recovery.test.ts`). See
   `docs/architecture/recovery.md`, `docs/testing/recovery.md` and ADR-006
+- **Phase 6 — doubt queue with deterministic ordering (implemented)**: students
+  `doubt.create` and teachers `doubt.resolve` / `doubt.dismiss`, with a
+  `doubt.queue.list` snapshot. The queue **is** PostgreSQL: order is
+  `(priority DESC, enqueueSeq ASC)` over OPEN doubts, where `enqueueSeq` is a
+  per-session monotonic integer the server assigns inside the accepting
+  transaction while holding the session row lock — so sequence order equals
+  durable acceptance order, not network/wall-clock/UUID/Redis order. Clients
+  can never set ordering fields; create is idempotent on `clientDoubtId`
+  (checked inside the same lock); resolve/dismiss are single conditional
+  `OPEN → terminal` updates. Mutations broadcast locally and propagate via
+  Redis notices; recovery carries the capped OPEN queue. Verified by a 100-way
+  concurrent create race split across two real instances (enqueueSeq exactly
+  1..100), resolve/dismiss races, idempotent retries and cross-session
+  authorization (`tests/integration/doubt-queue.test.ts`). See
+  `docs/architecture/doubt-queue.md`, `docs/testing/doubt-queue.md` and ADR-007
 
 **Not implemented yet** (by design, in phase order): Dockerized
 multi-instance compose (tests spawn independent in-process instances today),
-presence/doubt-queue Redis structures, Prometheus/Grafana, k6 load testing.
-Do not assume any of this exists.
+presence, Prometheus/Grafana, k6 load testing. Do not assume any of this
+exists.
 
-## Stack (as of Phase 5)
+## Stack (as of Phase 6)
 
 TypeScript (strict, ESM) · Node.js ≥ 22 · Fastify 5 · `ws` 8 · Prisma +
 PostgreSQL 17 · Redis 6 (node-redis, Pub/Sub propagation only) · Zod · Pino ·
@@ -136,6 +151,9 @@ curl -s http://localhost:3000/ws
   (design + implemented boundary)
 - `docs/architecture/recovery.md` — Phase 5 reconnect & recovery (design +
   snapshot contract + guarantees/limitations)
+- `docs/architecture/doubt-queue.md` — Phase 6 doubt queue (ordering contract,
+  events, concurrency, recovery integration)
 - `docs/testing/recovery.md` — how recovery is tested (scenarios R1–R11)
-- `docs/decisions/` — architecture decision records (ADR-001–006)
+- `docs/testing/doubt-queue.md` — how the doubt queue is tested (scenarios Q1–Q13)
+- `docs/decisions/` — architecture decision records (ADR-001–007)
 - `AGENT.md` — engineering principles, phase plan, honesty rules

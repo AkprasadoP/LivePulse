@@ -8,6 +8,9 @@ import {
   questionClosedPayloadSchema,
   answerAcceptedPayloadSchema,
   leaderboardUpdatedPayloadSchema,
+  doubtCreatedPayloadSchema,
+  doubtResolvedPayloadSchema,
+  doubtDismissedPayloadSchema,
   type ServerEnvelope,
 } from "./protocol.js";
 
@@ -81,6 +84,14 @@ export const DISTRIBUTED_EVENT_TYPES = [
   "question.closed",
   "answer.accepted",
   "leaderboard.updated",
+  // Phase 6 — doubt queue mutations. The queue itself never lives in Redis;
+  // these are post-commit notices whose receivers render frames. `occurredAt`
+  // is diagnostic: doubt ordering comes from payload.enqueueSeq, never from
+  // Redis delivery order. `doubt.queue.updated` is connection-local (a private
+  // response) and deliberately NOT distributed.
+  "doubt.created",
+  "doubt.resolved",
+  "doubt.dismissed",
 ] as const;
 export type DistributedEventType = (typeof DISTRIBUTED_EVENT_TYPES)[number];
 
@@ -90,6 +101,9 @@ const payloadSchemas: Record<DistributedEventType, z.ZodTypeAny> = {
   "question.closed": questionClosedPayloadSchema,
   "answer.accepted": answerAcceptedPayloadSchema,
   "leaderboard.updated": leaderboardUpdatedPayloadSchema,
+  "doubt.created": doubtCreatedPayloadSchema,
+  "doubt.resolved": doubtResolvedPayloadSchema,
+  "doubt.dismissed": doubtDismissedPayloadSchema,
 };
 
 /** Narrow a validated envelope to a known event type (or null). */

@@ -1,11 +1,11 @@
-# LivePulse WebSocket Protocol — Phase 2 + 3 + 5
+# LivePulse WebSocket Protocol — Phase 2 + 3 + 5 + 6
 
-> Scope: the protocol actually implemented through Phase 5 (reconnect &
-> recovery). It is **not** immutable — later phases add events (doubts,
-> presence) and possibly new envelope fields. Additions must be
-> backward-compatible: clients should ignore server event types they do not
-> recognize. Phase 5 added exactly one field (`session.joined.recovery`); no
-> event name, envelope shape or error code changed.
+> Scope: the protocol actually implemented through Phase 6 (doubt queue). It
+> is **not** immutable — later phases add events (presence) and possibly new
+> envelope fields. Additions must be backward-compatible: clients should
+> ignore server event types they do not recognize. Phase 5 added the
+> `session.joined.recovery` field; Phase 6 added the `doubt.*` events and the
+> `DOUBT_*` error codes. No earlier event shape changed.
 
 ## 1. Endpoint
 
@@ -317,6 +317,57 @@ under the lock) → `QUESTION_NOT_ACCEPTING_ANSWERS`; nothing is persisted.
 The client is never told the correct answer — only whether _its_ submission
 was correct.
 
+### 5.7 Doubt queue (Phase 6)
+
+The queue is durable in PostgreSQL; its order is the server-assigned
+`enqueueSeq` (see §7). Clients **never** send ordering fields — `enqueueSeq`
+and `priority` are rejected as unknown payload fields.
+
+#### `doubt.create`
+
+```json
+{
+  "type": "doubt.create",
+  "requestId": "d1",
+  "payload": { "content": "Why is the sky blue?", "clientDoubtId": "retry-1" }
+}
+```
+
+| Field           | Rules                                                   |
+| --------------- | ------------------------------------------------------- |
+| `content`       | string, 1–1000 chars                                    |
+| `clientDoubtId` | optional, 1–64 chars — idempotency key for safe retries |
+
+Requires joined + bound participant; the session must be `LIVE`
+(`SESSION_NOT_LIVE`). The server assigns `enqueueSeq` and `priority`.
+
+Ack/broadcast: `doubt.created` to the session (echoing `requestId`). A retry
+carrying a `clientDoubtId` already seen for this participant is **idempotent**:
+the stored doubt is re-sent privately and nothing is broadcast.
+
+#### `doubt.resolve` / `doubt.dismiss` (teacher)
+
+```json
+{ "type": "doubt.resolve", "requestId": "r1", "payload": { "doubtId": "018f..." } }
+```
+
+Requires joined + participant + role `TEACHER` (`TEACHER_REQUIRED`); the doubt
+must belong to the joined session, else `DOUBT_NOT_FOUND` (cross-session and
+unknown are indistinguishable). The transition is a single conditional
+`OPEN → RESOLVED`/`DISMISSED`; a doubt already terminal yields `DOUBT_NOT_OPEN`.
+Ack/broadcast: `doubt.resolved` / `doubt.dismissed`.
+
+#### `doubt.queue.list`
+
+```json
+{ "type": "doubt.queue.list", "requestId": "l1", "payload": {} }
+```
+
+Private response: `doubt.queue.updated` with the OPEN queue in canonical order
+and a `truncated` flag (cap 100 — a payload bound, **not** capacity). This is a
+convenience read, not a source of truth; if it is lost nothing is corrupted
+(clients converge via the recovery snapshot).
+
 ## 6. Server events
 
 | Event                 | Trigger / direction                        | requestId           |
@@ -328,6 +379,10 @@ was correct.
 | `question.closed`     | broadcast on `question.close`              | echoed (triggering) |
 | `answer.accepted`     | targeted verdict + session broadcast       | echoed / `null`     |
 | `leaderboard.updated` | on publish (empty), fresh answers, close   | echoed / `null`     |
+| `doubt.created`       | broadcast on `doubt.create`                | echoed (triggering) |
+| `doubt.resolved`      | broadcast on `doubt.resolve`               | echoed (triggering) |
+| `doubt.dismissed`     | broadcast on `doubt.dismiss`               | echoed (triggering) |
+| `doubt.queue.updated` | private response to `doubt.queue.list`     | echoed              |
 | `error`               | any failure                                | echoed / `null`     |
 
 `session.joined` payload (Phase 5): the participant triple + the `recovery`
@@ -396,6 +451,15 @@ INSERT** is the winner. Everything else is, by definition, not first —
 including submissions that were _sent_ earlier but serialized after the lock
 holder. The database clock (lock order + commit), not the wall clock, decides.
 
+**Doubt queue ordering.** Queue order is `(priority DESC, enqueueSeq ASC)` over
+OPEN doubts, where `enqueueSeq` is a per-session sequence PostgreSQL assigns
+inside the accepting transaction while holding the session row lock — so
+sequence order equals durable acceptance order. It is **not** network arrival
+order, wall-clock order, UUID order, or Redis delivery order. Clients order by
+the `enqueueSeq` they receive; the full ordered array arrives via
+`doubt.queue.updated` and the recovery snapshot. See
+`docs/architecture/doubt-queue.md` and ADR-007.
+
 ## 8. Error codes
 
 | Code                             | Meaning                                                                                                                            |
@@ -405,7 +469,7 @@ holder. The database clock (lock order + commit), not the wall clock, decides.
 | `INVALID_SESSION_ID`             | `payload.sessionId` of `session.join` is not a UUID (rejected before any DB access).                                               |
 | `SESSION_NOT_FOUND`              | UUID well-formed but no such session in PostgreSQL.                                                                                |
 | `SESSION_ALREADY_JOINED`         | Connection re-joined the session it is already in.                                                                                 |
-| `UNSUPPORTED_EVENT`              | `type` is a valid string but not a known client event (e.g. `doubt.create`, a later phase).                                        |
+| `UNSUPPORTED_EVENT`              | `type` is a valid string but not a known client event (e.g. `presence.heartbeat`, a later phase).                                  |
 | `NOT_JOINED`                     | Participant-bound event sent before joining a session.                                                                             |
 | `NOT_A_PARTICIPANT`              | Event requires a bound participant but the join was view-only (or the binding was detached by leave).                              |
 | `TEACHER_REQUIRED`               | Teacher-only event sent by a `STUDENT` participant.                                                                                |
@@ -414,6 +478,8 @@ holder. The database clock (lock order + commit), not the wall clock, decides.
 | `QUIZ_NOT_ACTIVE`                | `question.publish` attempted before `quiz.start`.                                                                                  |
 | `QUESTION_NOT_FOUND`             | Question unknown or not part of the joined session's quiz.                                                                         |
 | `QUESTION_NOT_ACCEPTING_ANSWERS` | Answer attempted while the question is not `PUBLISHED` (draft, closed, or closed mid-flight).                                      |
+| `DOUBT_NOT_FOUND`                | Doubt unknown or not part of the joined session (indistinguishable by design).                                                     |
+| `DOUBT_NOT_OPEN`                 | Transition attempted on a doubt that is already `RESOLVED`/`DISMISSED` (lost a concurrent race, or already handled).               |
 | `INVALID_STATE_TRANSITION`       | Illegal lifecycle transition (double publish, re-start, close of a closed question, …).                                            |
 | `INTERNAL_ERROR`                 | Unexpected server fault. Details are logged server-side only — never stack traces, Prisma or SQL errors.                           |
 

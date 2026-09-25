@@ -8,6 +8,7 @@ import { QuizRepository } from "../modules/quizzes/quiz.repository.js";
 import { AnswerRepository } from "../modules/answers/answer.repository.js";
 import { UserRepository } from "../modules/users/user.repository.js";
 import { ParticipantRepository } from "../modules/participants/participant.repository.js";
+import { DoubtRepository } from "../modules/doubts/doubt.repository.js";
 import { handleClientEnvelope } from "./handlers.js";
 import { createDistributor, type Distributor } from "./distribution.js";
 import { createRedisInfrastructure } from "../infrastructure/redis/index.js";
@@ -20,6 +21,9 @@ import {
   questionClosedMessage,
   answerAcceptedMessage,
   leaderboardUpdatedMessage,
+  doubtCreatedMessage,
+  doubtResolvedMessage,
+  doubtDismissedMessage,
   type ServerEnvelope,
 } from "./protocol.js";
 import type { AppConfig } from "../config/index.js";
@@ -80,6 +84,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     app.prisma,
     new UserRepository(app.prisma),
   );
+  const doubtRepository = new DoubtRepository(app.prisma);
 
   const wss = new WebSocketServer({
     noServer: true, // we own the upgrade routing (single shared HTTP server)
@@ -108,6 +113,12 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
           return answerAcceptedMessage(null, event.payload as never);
         case "leaderboard.updated":
           return leaderboardUpdatedMessage(null, event.payload as never);
+        case "doubt.created":
+          return doubtCreatedMessage(null, event.payload as never);
+        case "doubt.resolved":
+          return doubtResolvedMessage(null, event.payload as never);
+        case "doubt.dismissed":
+          return doubtDismissedMessage(null, event.payload as never);
       }
     },
   });
@@ -297,6 +308,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       quizRepository,
       answerRepository,
       participantRepository,
+      doubtRepository,
       prisma: app.prisma,
       log,
       distributor,

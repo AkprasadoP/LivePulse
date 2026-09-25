@@ -37,7 +37,7 @@ the session).
 | `quizzes`              | A quiz run inside a session              | session                | `DRAFT → ACTIVE → COMPLETED`                     |
 | `questions`            | One quiz item                            | quiz                   | `DRAFT → PUBLISHED → CLOSED`                     |
 | `answers`              | A participant's submission to a question | question + participant | immutable once written (append rows per attempt) |
-| `doubts`               | A raised question from a participant     | session + participant  | `OPEN → RESOLVED`                                |
+| `doubts`               | A raised question from a participant     | session + participant  | `OPEN → RESOLVED` / `OPEN → DISMISSED`           |
 
 Phase 3 additions: quiz/question state machines are now **driven** (see
 §3), `users.displayName` is unique (identity seam), `answers.isWinner`
@@ -167,44 +167,55 @@ PostgreSQL.
 
 ### doubts
 
-| Field                    | Type                              | Notes                                                                     |
-| ------------------------ | --------------------------------- | ------------------------------------------------------------------------- |
-| `id`                     | UUID PK                           | uuidv7                                                                    |
-| `sessionId`              | UUID → sessions                   | NOT NULL, **Cascade**                                                     |
-| `participantId`          | UUID → session_participants       | NOT NULL, **Cascade**                                                     |
-| `content`                | text                              | non-null                                                                  |
-| `priority`               | int                               | default 0; higher = more urgent (ordering contract documented in Phase 8) |
-| `status`                 | `DoubtStatus` (`OPEN`,`RESOLVED`) | default `OPEN`                                                            |
-| `resolvedAt`             | timestamptz                       | null while `OPEN`                                                         |
-| `createdAt`, `updatedAt` | timestamptz                       |                                                                           |
+| Field                    | Type                                          | Notes                                                            |
+| ------------------------ | --------------------------------------------- | ---------------------------------------------------------------- |
+| `id`                     | UUID PK                                       | uuidv7                                                           |
+| `sessionId`              | UUID → sessions                               | NOT NULL, **Cascade**                                            |
+| `participantId`          | UUID → session_participants                   | NOT NULL, **Cascade**                                            |
+| `content`                | text                                          | non-null                                                         |
+| `enqueueSeq`             | int NOT NULL                                  | **ordering authority** (Phase 6): per-session, server-assigned   |
+| `priority`               | int                                           | default 0; higher = more urgent (first key of the order)         |
+| `doubtRequestId`         | varchar(64) nullable                          | client idempotency key for create retries                        |
+| `status`                 | `DoubtStatus` (`OPEN`,`RESOLVED`,`DISMISSED`) | default `OPEN`                                                   |
+| `resolvedAt`             | timestamptz                                   | null while `OPEN`; terminal timestamp for RESOLVED and DISMISSED |
+| `createdAt`, `updatedAt` | timestamptz                                   | diagnostic only — never used for ordering                        |
 
-Deliberately **not** modeled here: per-session queue sequence numbers.
-Redis will hold the live queue later; PostgreSQL is the durable record of
-doubts and their resolution state.
+`sessions` gains `doubtSeq int default 0`: the per-session counter that is
+locked (`SELECT … FOR UPDATE`) and incremented in the same transaction that
+inserts a doubt, so `enqueueSeq` order equals durable acceptance order. Both
+`enqueueSeq` and `priority` are **server-owned** — no client can set them.
+
+The queue **is** this table: PostgreSQL holds the live ordering (ADR-007);
+Redis is notification only. Not modeled: persisted queue positions (derived
+on read), resolver identity (deferred), reopen (terminal states are final).
 
 ## 5. Indexes (beyond PKs/uniques) — with query justification
 
-| Index                                            | Query it supports                                                | Access pattern                                       |
-| ------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------------------- |
-| `quizzes.sessionId`                              | fetch all quizzes of a session                                   | session detail page / quiz list (frequent, Phase 3+) |
-| `questions.quizId`                               | fetch ordered questions of a quiz                                | quiz delivery + reconnection state rebuild           |
-| `answers.questionId_submittedAt_idx`             | submissions of a question in time order                          | leaderboard/timing queries (Phase 3 leaderboard)     |
-| `answers_one_winner_per_question_key` (partial)  | schema-level winner invariant                                    | defense-in-depth for the ADR-004 election            |
-| `questions_one_published_per_quiz_key` (partial) | schema-level single-open-question invariant                      | teacher publish flow (Phase 3)                       |
-| `answers.participantId`                          | a participant's answer history                                   | reconnect recovery: "what did I already answer?"     |
-| `doubts.sessionId_status_priority_createdAt_idx` | open doubts of a session ordered by priority DESC, createdAt ASC | teacher's queue view (Phase 8 ordering contract)     |
-| `doubts.participantId`                           | a participant's doubts                                           | moderation/history                                   |
-| `session_participants.userId`                    | all sessions a user participates in                              | user-centric listing                                 |
+| Index                                             | Query it supports                                                 | Access pattern                                       |
+| ------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------- |
+| `quizzes.sessionId`                               | fetch all quizzes of a session                                    | session detail page / quiz list (frequent, Phase 3+) |
+| `questions.quizId`                                | fetch ordered questions of a quiz                                 | quiz delivery + reconnection state rebuild           |
+| `answers.questionId_submittedAt_idx`              | submissions of a question in time order                           | leaderboard/timing queries (Phase 3 leaderboard)     |
+| `answers_one_winner_per_question_key` (partial)   | schema-level winner invariant                                     | defense-in-depth for the ADR-004 election            |
+| `questions_one_published_per_quiz_key` (partial)  | schema-level single-open-question invariant                       | teacher publish flow (Phase 3)                       |
+| `answers.participantId`                           | a participant's answer history                                    | reconnect recovery: "what did I already answer?"     |
+| `doubts_sessionId_status_priority_enqueueSeq_idx` | open doubts of a session ordered by priority DESC, enqueueSeq ASC | teacher's queue view + recovery (Phase 6 contract)   |
+| `doubts_sessionId_enqueueSeq_key` (unique)        | one doubt per (session, enqueueSeq)                               | ordering-key uniqueness                              |
+| `doubts_client_request_key` (partial)             | retried create with the same clientDoubtId                        | create idempotency backstop (hand-written SQL)       |
+| `doubts.participantId`                            | a participant's doubts                                            | moderation/history                                   |
+| `session_participants.userId`                     | all sessions a user participates in                               | user-centric listing                                 |
 
 Uniques also create implicit indexes: `(sessionId,userId)` on
 `session_participants`, `(quizId,position)` on `questions`,
 `(questionId,participantId,attemptNumber)` on `answers`, and
 `users.displayName` (Phase 3 identity seam).
 
-> Note: the two partial unique indexes above are hand-completed in the
-> migration SQL (`20260922191225_phase3_quiz_and_winner`) because Prisma
-> cannot express partial indexes in its DSL; `prisma migrate diff` reports
-> the drift harmlessly. Reason documented per the AGENT.md migration rule.
+> Note: partial unique indexes are hand-completed in migration SQL because
+> Prisma cannot express them in its DSL: the Phase 3 winner / one-published-
+> question indexes (`20260922191225_phase3_quiz_and_winner`) and the Phase 6
+> doubt idempotency index (`20260925120000_phase6_doubt_queue`).
+> `prisma migrate diff` reports the drift harmlessly. Reason documented per
+> the AGENT.md migration rule.
 
 ## 6. Referential actions summary
 
@@ -222,6 +233,7 @@ Uniques also create implicit indexes: `(sessionId,userId)` on
 
 - PostgreSQL (this schema): **all durable state** — identities, sessions,
   memberships, quizzes, questions, answers, doubts.
-- Redis (future): only ephemeral/reconstructible state — presence, live
-  queue ordering, cross-instance pub/sub. Nothing in this schema encodes
-  Redis structures.
+- Redis: only ephemeral/reconstructible state — cross-instance pub/sub
+  notices (Phase 4) and connection-local frame rendering. It is **not** queue
+  storage: the doubt queue's ordering lives in `doubts.enqueueSeq` (Phase 6,
+  ADR-007). Nothing durable depends on Redis.

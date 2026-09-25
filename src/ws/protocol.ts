@@ -71,6 +71,23 @@ export const quizAnswerSchema = z.strictObject({
   content: z.string().min(1).max(2_000),
 });
 
+// ---- Phase 6: doubt queue -------------------------------------------------
+// enqueueSeq and priority are deliberately absent from every client schema:
+// the server owns ordering, clients never set it (ADR-007).
+
+export const doubtCreateSchema = z.strictObject({
+  content: z.string().min(1).max(1_000),
+  /**
+   * Optional idempotency key: a retried create (e.g. after a reconnect) with
+   * the same key resolves to the existing doubt instead of enqueuing a second.
+   */
+  clientDoubtId: z.string().min(1).max(64).optional(),
+});
+
+export const doubtResolveSchema = z.strictObject({ doubtId: z.uuid() });
+export const doubtDismissSchema = z.strictObject({ doubtId: z.uuid() });
+export const doubtQueueListSchema = z.strictObject({});
+
 /** Client event name -> its payload schema. The dispatch table for handlers. */
 export const clientEventSchemas = {
   "session.join": sessionJoinSchema,
@@ -79,6 +96,10 @@ export const clientEventSchemas = {
   "question.publish": questionPublishSchema,
   "question.close": questionCloseSchema,
   "quiz.answer": quizAnswerSchema,
+  "doubt.create": doubtCreateSchema,
+  "doubt.resolve": doubtResolveSchema,
+  "doubt.dismiss": doubtDismissSchema,
+  "doubt.queue.list": doubtQueueListSchema,
 } as const;
 
 export type ClientEventType = keyof typeof clientEventSchemas;
@@ -94,6 +115,9 @@ const PARTICIPANT_REQUIRED_EVENTS: ReadonlySet<ClientEventType> = new Set([
   "question.publish",
   "question.close",
   "quiz.answer",
+  "doubt.create",
+  "doubt.resolve",
+  "doubt.dismiss",
 ]);
 
 export function requiresParticipant(type: ClientEventType): boolean {
@@ -110,6 +134,24 @@ export const leaderboardEntrySchema = z.object({
   correctCount: z.number().int(),
   isWinner: z.boolean(),
 });
+
+/**
+ * Public representation of one doubt, shared by `doubt.created`, the
+ * `doubt.queue.updated` snapshot and the Phase 5 recovery snapshot — so a
+ * doubt has exactly one wire shape everywhere. `enqueueSeq` is the ordering
+ * authority; `priority` is server-controlled (bump deferred).
+ */
+export const doubtViewSchema = z.object({
+  doubtId: z.uuid(),
+  participantId: z.uuid(),
+  displayName: z.string(),
+  content: z.string(),
+  priority: z.number().int(),
+  enqueueSeq: z.number().int(),
+  status: z.enum(["OPEN", "RESOLVED", "DISMISSED"]),
+  createdAt: z.string().datetime(),
+});
+export type DoubtView = z.infer<typeof doubtViewSchema>;
 
 /**
  * Phase 5 recovery snapshot — one entry per quiz of the session.
@@ -156,6 +198,15 @@ export const recoverySnapshotSchema = z.object({
   question: recoveryQuestionSchema.nullable(),
   ownAnswer: recoveryOwnAnswerSchema.nullable(),
   standings: z.array(leaderboardEntrySchema),
+  /**
+   * Phase 6: the session's OPEN doubt queue in canonical order, capped as a
+   * payload bound (never a capacity limit — PostgreSQL keeps every row).
+   * `truncated` is true when OPEN doubts exist beyond the cap.
+   */
+  doubts: z.object({
+    open: z.array(doubtViewSchema),
+    truncated: z.boolean(),
+  }),
 });
 
 export const sessionJoinedPayloadSchema = z.object({
@@ -229,6 +280,42 @@ export const leaderboardUpdatedPayloadSchema = z.object({
   standings: z.array(leaderboardEntrySchema),
 });
 
+// ---- Phase 6: doubt queue server events -----------------------------------
+
+/** Session broadcast on a fresh `doubt.create`. */
+export const doubtCreatedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  doubt: doubtViewSchema,
+});
+
+/** Session broadcast on `doubt.resolve`. */
+export const doubtResolvedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  doubtId: z.uuid(),
+  status: z.literal("RESOLVED"),
+  resolvedAt: z.string().datetime(),
+});
+
+/** Session broadcast on `doubt.dismiss`. */
+export const doubtDismissedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  doubtId: z.uuid(),
+  status: z.literal("DISMISSED"),
+  resolvedAt: z.string().datetime(),
+});
+
+/**
+ * Private response to `doubt.queue.list`: the authoritative OPEN queue. This
+ * is a convenience read, NOT a correctness requirement — clients converge via
+ * the recovery snapshot and the granular created/resolved/dismissed events.
+ */
+export const doubtQueueUpdatedPayloadSchema = z.object({
+  sessionId: z.uuid(),
+  doubts: z.array(doubtViewSchema),
+  /** True when OPEN doubts exist beyond the payload cap. */
+  truncated: z.boolean(),
+});
+
 export const errorPayloadSchema = z.object({
   code: z.enum([
     "INVALID_MESSAGE",
@@ -246,6 +333,8 @@ export const errorPayloadSchema = z.object({
     "QUIZ_NOT_ACTIVE",
     "QUESTION_NOT_ACCEPTING_ANSWERS",
     "INVALID_STATE_TRANSITION",
+    "DOUBT_NOT_FOUND",
+    "DOUBT_NOT_OPEN",
     "INTERNAL_ERROR",
   ]),
   message: z.string(),
@@ -316,6 +405,34 @@ export function leaderboardUpdatedMessage(
   payload: z.infer<typeof leaderboardUpdatedPayloadSchema>,
 ): ServerEnvelope {
   return { type: "leaderboard.updated", requestId, payload };
+}
+
+export function doubtCreatedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof doubtCreatedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "doubt.created", requestId, payload };
+}
+
+export function doubtResolvedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof doubtResolvedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "doubt.resolved", requestId, payload };
+}
+
+export function doubtDismissedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof doubtDismissedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "doubt.dismissed", requestId, payload };
+}
+
+export function doubtQueueUpdatedMessage(
+  requestId: string | null,
+  payload: z.infer<typeof doubtQueueUpdatedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "doubt.queue.updated", requestId, payload };
 }
 
 export function errorMessage(requestId: string | null, payload: ErrorPayload): ServerEnvelope {

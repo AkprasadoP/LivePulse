@@ -5,6 +5,7 @@ import { SessionRepository } from "../modules/sessions/session.repository.js";
 import { QuizRepository } from "../modules/quizzes/quiz.repository.js";
 import { AnswerRepository } from "../modules/answers/answer.repository.js";
 import { ParticipantRepository } from "../modules/participants/participant.repository.js";
+import { DoubtRepository } from "../modules/doubts/doubt.repository.js";
 import { NotFoundError, InvalidStateTransitionError } from "../shared/errors.js";
 import { sessionJoinedMessage, sessionStateMessage } from "./protocol.js";
 import { buildRecoverySnapshot, type RecoverySnapshot } from "./recovery.js";
@@ -23,6 +24,12 @@ import {
   handleQuestionClose,
   handleQuizAnswer,
 } from "./quiz-handlers.js";
+import {
+  handleDoubtCreate,
+  handleDoubtResolve,
+  handleDoubtDismiss,
+  handleDoubtQueueList,
+} from "./doubt-handlers.js";
 import type { Distributor } from "./distribution.js";
 
 export type HandlerLog = {
@@ -37,6 +44,8 @@ export interface HandlerDependencies {
   quizRepository: QuizRepository;
   answerRepository: AnswerRepository;
   participantRepository: ParticipantRepository;
+  /** Phase 6: the doubt queue (PostgreSQL is the queue's source of truth). */
+  doubtRepository: DoubtRepository;
   /** Phase 5: recovery snapshots read PostgreSQL through the shared client. */
   prisma: PrismaClient;
   log: HandlerLog;
@@ -55,6 +64,21 @@ export function send(connection: Connection, message: ServerEnvelope, log: Handl
   connection.socket.send(JSON.stringify(message), (error) => {
     if (error) log.warn({ err: error.message }, "WebSocket send failed");
   });
+}
+
+/**
+ * Deliver one envelope to every local connection joined to a session.
+ * Shared by the quiz and doubt handlers: a broadcast is a per-instance,
+ * in-memory fan-out; cross-instance delivery is Redis's job (ADR-005).
+ */
+export function broadcast(
+  deps: HandlerDependencies,
+  sessionId: string,
+  message: ServerEnvelope,
+): void {
+  for (const target of deps.registry.getConnectionsForSession(sessionId)) {
+    send(target, message, deps.log);
+  }
 }
 
 export function serializeSessionState(session: {
@@ -163,7 +187,13 @@ export async function handleClientEnvelope(
     }
   }
   // ...and teacher events additionally need the TEACHER role.
-  const teacherEvents = ["quiz.start", "question.publish", "question.close"] as const;
+  const teacherEvents = [
+    "quiz.start",
+    "question.publish",
+    "question.close",
+    "doubt.resolve",
+    "doubt.dismiss",
+  ] as const;
   if (
     (teacherEvents as readonly string[]).includes(type) &&
     connection.participantRole !== "TEACHER"
@@ -189,6 +219,8 @@ export async function handleClientEnvelope(
       | { quizId: string }
       | { questionId: string }
       | { questionId: string; content: string }
+      | { content: string; clientDoubtId?: string }
+      | { doubtId: string }
       | Record<string, never>;
     switch (type) {
       case "session.join":
@@ -219,6 +251,23 @@ export async function handleClientEnvelope(
           deps,
         );
         return;
+      case "doubt.create":
+        await handleDoubtCreate(
+          connection,
+          payload as { content: string; clientDoubtId?: string },
+          requestId,
+          deps,
+        );
+        return;
+      case "doubt.resolve":
+        await handleDoubtResolve(connection, payload as { doubtId: string }, requestId, deps);
+        return;
+      case "doubt.dismiss":
+        await handleDoubtDismiss(connection, payload as { doubtId: string }, requestId, deps);
+        return;
+      case "doubt.queue.list":
+        await handleDoubtQueueList(connection, requestId, deps);
+        return;
     }
   } catch (error) {
     handleError(connection, error, requestId, type, deps);
@@ -233,6 +282,9 @@ function protocolErrorFor(error: unknown): ErrorPayload | null {
     }
     if (resource === "question") {
       return { code: "QUESTION_NOT_FOUND", message: "Question does not exist", details: null };
+    }
+    if (resource === "doubt") {
+      return { code: "DOUBT_NOT_FOUND", message: "Doubt does not exist", details: null };
     }
     return { code: "SESSION_NOT_FOUND", message: "Session does not exist", details: null };
   }
@@ -341,7 +393,11 @@ async function handleSessionJoin(
   let recovery: RecoverySnapshot | null = null;
   try {
     recovery = await buildRecoverySnapshot(
-      { prisma: deps.prisma, answerRepository: deps.answerRepository },
+      {
+        prisma: deps.prisma,
+        answerRepository: deps.answerRepository,
+        doubtRepository: deps.doubtRepository,
+      },
       payload.sessionId,
       participant?.id ?? null,
     );
