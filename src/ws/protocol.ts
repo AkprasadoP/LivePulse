@@ -223,7 +223,7 @@ export function sessionStateMessage(
 }
 
 export function quizStartedMessage(
-  requestId: string,
+  requestId: string | null,
   payload: z.infer<typeof quizStartedPayloadSchema>,
 ): ServerEnvelope {
   return { type: "quiz.started", requestId, payload };

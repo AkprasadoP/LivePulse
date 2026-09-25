@@ -12,8 +12,8 @@ WS protocol: `docs/api/websocket-protocol.md` · Schema:
 
 ## Current implementation status
 
-**Phase 3 — Live Quiz Execution + Concurrency** (complete; Phases 1–2
-retained beneath it):
+**Phase 4 — Distributed WebSockets (Redis Pub/Sub distribution)** (complete;
+Phases 1–3 retained beneath it):
 
 - Everything from Phases 1–2: typed Fastify HTTP server, fail-fast Zod
   config, Pino logging, graceful shutdown, liveness-only `/health`, the
@@ -40,19 +40,30 @@ retained beneath it):
   simultaneous correct answers (the 100 race repeated 3×) and a mixed
   correct/incorrect run — exactly one winner on every run
   (`docs/testing/concurrency.md`)
-- Vitest suites: 49 unit tests + 83 integration tests against real
+- Vitest suites: 49 unit tests + 91 integration tests against real
   PostgreSQL and real WebSocket clients
+- **Phase 4 — distributed WebSockets (implemented)**: inter-instance event
+  distribution over Redis Pub/Sub, strictly as post-commit event notices on a
+  single global channel — PostgreSQL stays the sole source of truth, winner
+  election stays in the database, the receive path never writes, delivery is
+  at-most-once with PostgreSQL reconciliation, and Redis outages degrade
+  propagation only (`DISTRIBUTION_ENABLED` switch). Verified with two real
+  independent instances: cross-instance question/verdict/leaderboard
+  delivery, no echo/duplicates, a 20-student race split across both
+  instances still electing exactly one winner, clean shutdown, and
+  disabled-distribution degradation (`tests/integration/distributed.test.ts`).
+  See `docs/architecture/distributed-websockets.md` and ADR-005
 
-**Not implemented yet** (by design, in phase order): Redis integration
-(pub/sub, presence, doubt queue), multi-instance deployment, reconnect
-recovery, Prometheus/Grafana, k6 load testing. Do not assume any of this
-exists.
+**Not implemented yet** (by design, in phase order): Dockerized
+multi-instance compose (tests spawn independent in-process instances today),
+presence/doubt-queue Redis structures, reconnect recovery, Prometheus/Grafana,
+k6 load testing. Do not assume any of this exists.
 
-## Stack (as of Phase 3)
+## Stack (as of Phase 4)
 
 TypeScript (strict, ESM) · Node.js ≥ 22 · Fastify 5 · `ws` 8 · Prisma +
-PostgreSQL 17 · Zod · Pino · Vitest · Docker Compose (PostgreSQL + Redis).
-Redis is running but unused until Phase 5. k6, Nginx and
+PostgreSQL 17 · Redis 6 (node-redis, Pub/Sub propagation only) · Zod · Pino ·
+Vitest · Docker Compose (PostgreSQL + Redis). k6, Nginx and
 Prometheus/Grafana arrive with their phases.
 
 ## Commands
@@ -108,5 +119,7 @@ curl -s http://localhost:3000/ws
 - `docs/database/schema.md` — entities, lifecycles, constraints, indexes
 - `docs/testing/websocket-testing.md` — how the WS layer is tested
 - `docs/testing/concurrency.md` — how the one-winner race is demonstrated
-- `docs/decisions/` — architecture decision records (ADR-001–004)
+- `docs/architecture/distributed-websockets.md` — Phase 4 horizontal scaling
+  (design + implemented boundary)
+- `docs/decisions/` — architecture decision records (ADR-001–005)
 - `AGENT.md` — engineering principles, phase plan, honesty rules

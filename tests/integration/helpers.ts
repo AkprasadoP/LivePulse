@@ -118,6 +118,60 @@ export interface ListeningServer extends TestServer {
 }
 
 /**
+ * Phase 4: an INDEPENDENT app instance (own Fastify, own WS layer, own Redis
+ * connections, own registry) for multi-instance tests. Deliberately not tied
+ * to the single `current` server: two of these run simultaneously.
+ */
+export interface IndependentInstance {
+  app: FastifyInstance;
+  port: number;
+  instanceId: string;
+  /** Resolves when the Redis subscribe attempt has completed. */
+  distributionReady: Promise<void>;
+  close(): Promise<void>;
+}
+
+/**
+ * Boot one fully independent instance with a distinct INSTANCE_ID on an
+ * ephemeral port, sharing the compose PostgreSQL + Redis.
+ */
+export async function startIndependentInstance(
+  instanceId: string,
+  overrides: { distributionEnabled?: boolean } = {},
+): Promise<IndependentInstance> {
+  const config = loadConfig({
+    NODE_ENV: "test",
+    DATABASE_URL: TEST_DATABASE_URL,
+    REDIS_URL: process.env.LIVEPULSE_TEST_REDIS_URL ?? "redis://localhost:6380",
+    PORT: "0",
+    INSTANCE_ID: instanceId,
+    DISTRIBUTION_ENABLED: (overrides.distributionEnabled ?? true) ? "true" : "false",
+  });
+  const app = await buildApp({ config, listen: true });
+  const address = app.server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Expected the instance to listen on a TCP port");
+  }
+  const layer = app.wsLayer;
+  if (layer === null) throw new Error("WS layer missing after listen");
+  await layer.distributionReady;
+  return {
+    app,
+    port: address.port,
+    instanceId,
+    distributionReady: Promise.resolve(),
+    close: () => app.close(),
+  };
+}
+
+/** WsTestClient connected to a SPECIFIC instance (not the shared `current`). */
+export async function connectToInstance(instance: IndependentInstance): Promise<WsTestClient> {
+  const client = new WsTestClient();
+  await client.connect(instance.port);
+  return client;
+}
+
+/**
  * Start the app with a real listener and return its port. WebSocket suites
  * connect real ws clients here — no socket mocking anywhere.
  */
@@ -164,9 +218,15 @@ export async function stopTestApp(): Promise<void> {
   current = null;
 }
 
-/** Wipes all domain data between tests. Order is irrelevant thanks to CASCADE. */
-export async function resetDatabase(): Promise<void> {
-  if (!current) throw new Error("startTestApp() must run before resetDatabase()");
+/**
+ * Wipes all domain data between tests. Order is irrelevant thanks to CASCADE.
+ * Accepts an explicit client (multi-instance suites, which own their own
+ * Prisma connection and do not use the shared `current` server).
+ */
+export async function resetDatabase(explicitPrisma?: PrismaClient): Promise<void> {
+  const target = explicitPrisma ?? current?.prisma;
+  if (!target)
+    throw new Error("resetDatabase() needs a running test app or an explicit prisma client");
   // TRUNCATE takes ACCESS EXCLUSIVE locks on every table; a still-in-flight
   // server transaction (e.g. an answer submission mid-election) can hold a
   // conflicting lock, and Postgres resolves the resulting cycle by aborting
@@ -174,7 +234,7 @@ export async function resetDatabase(): Promise<void> {
   const maxAttempts = 5;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      await current.prisma.$executeRawUnsafe(
+      await target.$executeRawUnsafe(
         `TRUNCATE TABLE answers, doubts, questions, quizzes, session_participants, sessions, users RESTART IDENTITY CASCADE`,
       );
       return;

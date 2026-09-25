@@ -33,6 +33,29 @@ export const envSchema = z.object({
    * considered dead and terminated. See docs/architecture/websocket-architecture.md.
    */
   WS_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1_000).max(600_000).default(30_000),
+  /**
+   * Unique application-instance identity (Phase 4). Never derived from a
+   * hostname: it names the LOGICAL instance for echo suppression, tracing
+   * and ops. Random per process by default; pinned per service in compose.
+   */
+  INSTANCE_ID: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]+$/, "INSTANCE_ID must be alphanumeric with - or _")
+    .default(
+      // Random suffix per boot; not a restart-stable identity on purpose.
+      `ws-${Math.random().toString(36).slice(2, 10)}`,
+    ),
+  /**
+   * Master switch for the Phase 4 distribution layer. On (default) the
+   * instance subscribes to the global channel and publishes post-commit
+   * notices; off = single-instance mode (tests, local development).
+   */
+  DISTRIBUTION_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

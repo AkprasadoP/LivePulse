@@ -74,6 +74,8 @@ pnpm test:integration
 ## Not covered yet (deliberate)
 
 - Reconnect/recovery semantics (Phase 7).
-- Multi-instance behavior (Phase 6) — nothing to test single-instance.
+- Dockerized multi-instance behavior (Phase 6) — cross-instance distribution
+  is already covered by `distributed.test.ts` with two independent
+  in-process instances; containerized instances + Nginx arrive in Phase 6.
 - Load/backpressure behavior (Phase 10, k6).
 - Authentication on the upgrade path (auth phase).

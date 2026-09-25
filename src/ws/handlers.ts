@@ -21,6 +21,7 @@ import {
   handleQuestionClose,
   handleQuizAnswer,
 } from "./quiz-handlers.js";
+import type { Distributor } from "./distribution.js";
 
 export type HandlerLog = {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -35,6 +36,13 @@ export interface HandlerDependencies {
   answerRepository: AnswerRepository;
   participantRepository: ParticipantRepository;
   log: HandlerLog;
+  /**
+   * Phase 4 distribution (optional so unit-ish usages stay simple): used by
+   * handlers ONLY after a successful PostgreSQL commit to fan the event out
+   * to other instances. Never called before commit; never called on the
+   * Redis receive path.
+   */
+  distributor?: Distributor;
 }
 
 /** Serialize and send one envelope; failures are logged, never thrown. */

@@ -66,6 +66,8 @@ export async function handleQuizStart(
 
   const updated = await deps.quizRepository.transitionQuizState(quiz.id, "ACTIVE");
   deps.log.info({ sessionId, quizId: quiz.id }, "WebSocket quiz started");
+  // COMMIT succeeded -> local broadcast -> post-commit publish (in that
+  // order; Redis is never inside the PostgreSQL transaction — ADR-005).
   broadcast(
     deps,
     sessionId,
@@ -75,6 +77,11 @@ export async function handleQuizStart(
       state: updated.state,
     }),
   );
+  deps.distributor?.publish({
+    type: "quiz.started",
+    sessionId,
+    payload: { sessionId, quizId: updated.id, state: updated.state },
+  });
 }
 
 export async function handleQuestionPublish(
@@ -136,6 +143,26 @@ export async function handleQuestionPublish(
       standings: [],
     }),
   );
+  // Notices map 1:1 to the origin's remote-visible broadcast frames: the
+  // publish flow emits question.published AND the empty-leaderboard reset.
+  deps.distributor?.publish({
+    type: "question.published",
+    sessionId,
+    payload: {
+      sessionId,
+      quizId: quiz.id,
+      questionId: updated.id,
+      position: updated.position,
+      prompt: updated.prompt,
+      firstCorrectWins: updated.firstCorrectWins,
+      acceptingAnswers: true,
+    },
+  });
+  deps.distributor?.publish({
+    type: "leaderboard.updated",
+    sessionId,
+    payload: { sessionId, questionId: updated.id, standings: [] },
+  });
 }
 
 export async function handleQuestionClose(
@@ -177,6 +204,20 @@ export async function handleQuestionClose(
       standings: await deps.answerRepository.leaderboardForQuestion(question.id),
     }),
   );
+  deps.distributor?.publish({
+    type: "question.closed",
+    sessionId,
+    payload: { sessionId, quizId: quiz.id, questionId: updated.id },
+  });
+  deps.distributor?.publish({
+    type: "leaderboard.updated",
+    sessionId,
+    payload: {
+      sessionId,
+      questionId: updated.id,
+      standings: await deps.answerRepository.leaderboardForQuestion(question.id),
+    },
+  });
 }
 
 /**
@@ -267,13 +308,35 @@ export async function handleQuizAnswer(
       attemptNumber: result.answer.attemptNumber,
     }),
   );
+  const standings = await deps.answerRepository.leaderboardForQuestion(question.id);
   broadcast(
     deps,
     sessionId,
     leaderboardUpdatedMessage(null, {
       sessionId,
       questionId: question.id,
-      standings: await deps.answerRepository.leaderboardForQuestion(question.id),
+      standings,
     }),
   );
+  // Notices map 1:1 to the origin's remote-visible broadcast frames (design
+  // §8, amended during implementation): remote instances render one frame per
+  // notice with NO database access on the receive path.
+  deps.distributor?.publish({
+    type: "answer.accepted",
+    sessionId,
+    payload: {
+      sessionId,
+      questionId: question.id,
+      participantId,
+      displayName: connection.displayName ?? "",
+      isCorrect: result.answer.isCorrect,
+      isWinner: result.answer.isWinner,
+      attemptNumber: result.answer.attemptNumber,
+    },
+  });
+  deps.distributor?.publish({
+    type: "leaderboard.updated",
+    sessionId,
+    payload: { sessionId, questionId: question.id, standings },
+  });
 }

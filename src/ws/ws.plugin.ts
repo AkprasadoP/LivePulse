@@ -9,10 +9,17 @@ import { AnswerRepository } from "../modules/answers/answer.repository.js";
 import { UserRepository } from "../modules/users/user.repository.js";
 import { ParticipantRepository } from "../modules/participants/participant.repository.js";
 import { handleClientEnvelope } from "./handlers.js";
+import { createDistributor, type Distributor } from "./distribution.js";
+import { createRedisInfrastructure } from "../infrastructure/redis/index.js";
 import {
   clientEnvelopeSchema,
   errorMessage,
   requestIdSchema,
+  quizStartedMessage,
+  questionPublishedMessage,
+  questionClosedMessage,
+  answerAcceptedMessage,
+  leaderboardUpdatedMessage,
   type ServerEnvelope,
 } from "./protocol.js";
 import type { AppConfig } from "../config/index.js";
@@ -32,6 +39,15 @@ export interface WebSocketLayer {
   close(): Promise<void>;
   /** Test/diagnostics hook: currently-open socket count. */
   get connectionCount(): number;
+  /** Phase 4: inter-instance distributor (present even when disabled, for tests). */
+  distributor: Distributor;
+  /**
+   * Resolves once the Redis connections have finished their initial connect
+   * attempt (resolves even when Redis is unreachable — publish/subscribe
+   * keep retrying in the background). Await this in tests before asserting
+   * on cross-instance delivery.
+   */
+  distributionReady: Promise<void>;
 }
 
 const WS_PATH = "/ws";
@@ -70,6 +86,38 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     maxPayload: MAX_PAYLOAD_BYTES,
   });
 
+  // ---- Phase 4 distribution (Redis Pub/Sub) --------------------------------
+  // Post-commit event fan-out ONLY (ADR-005). The subscriber path is
+  // read-only: validate -> version check -> echo drop -> local-interest
+  // filter -> render frames. It never writes PostgreSQL and never republishes.
+  const redis = createRedisInfrastructure({ config, log: app.log });
+  const distributor = createDistributor({
+    instanceId: config.INSTANCE_ID,
+    redis,
+    registry,
+    log: app.log,
+    render: (event) => {
+      switch (event.type) {
+        case "quiz.started":
+          return quizStartedMessage(null, event.payload as never);
+        case "question.published":
+          return questionPublishedMessage(null, event.payload as never);
+        case "question.closed":
+          return questionClosedMessage(null, event.payload as never);
+        case "answer.accepted":
+          return answerAcceptedMessage(null, event.payload as never);
+        case "leaderboard.updated":
+          return leaderboardUpdatedMessage(null, event.payload as never);
+      }
+    },
+  });
+  const distributionReady: Promise<void> = config.DISTRIBUTION_ENABLED
+    ? redis.connect() // resolves even if Redis is unreachable; reconnects with capped backoff
+    : Promise.resolve();
+  // The layer owns Redis now; an unhandled rejection here must not crash the
+  // process (connect() already allSettles internally — this is belt-and-braces).
+  distributionReady.catch(() => {});
+
   // ---- HTTP Upgrade routing ----------------------------------------------
   const upgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     const { pathname } = new URL(request.url ?? "/", "ws://localhost");
@@ -87,7 +135,13 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   // registered by app.ts BEFORE listening — Fastify rejects post-listen routes.)
 
   // ---- Connection lifecycle ----------------------------------------------
+  // TCP accept -> HTTP Upgrade -> path check -> 101 -> 'connection'.
+  // Deliberately NOT using wss.on('connection')-only: the registry entry is
+  // created synchronously with the socket so no message can race it.
   wss.on("connection", (socket: WebSocket, request: IncomingMessage) => {
+    // Phase 4: a connecting socket is marked alive immediately and the
+    // instance-local registry entry exists before any client frame can be
+    // processed (the 'message' handlers attach below, synchronously).
     const connection = registry.addConnection(socket);
     app.log.info({ remoteAddress: request.socket.remoteAddress }, "WebSocket connection opened");
 
@@ -145,6 +199,9 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   heartbeat.unref(); // never keep the process alive just for pings
 
   // ---- Shutdown -----------------------------------------------------------
+  // Order (Phase 4 §13): sockets first (as in Phase 2), then Redis
+  // unsubscribe/quit, then the WSS. Nothing here can hang: disconnect() is
+  // socket-level, not command-level.
   const close = async (): Promise<void> => {
     clearInterval(heartbeat);
     httpServer.removeListener("upgrade", upgradeListener);
@@ -152,11 +209,14 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       connection.socket.close(1001, "server shutting down");
     }
     await new Promise<void>((resolve) => wss.close(() => resolve()));
+    await distributor.close();
   };
 
   return {
     registry,
     close,
+    distributor,
+    distributionReady,
     get connectionCount() {
       return registry.connectionCount;
     },
@@ -238,6 +298,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       answerRepository,
       participantRepository,
       log,
+      distributor,
     });
   }
 
