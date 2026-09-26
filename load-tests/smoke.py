@@ -22,6 +22,7 @@ SERVER_PID_FILE = "/tmp/server.pid"
 LOAD_OUT = "/tmp/load-out.txt"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = PROJECT_ROOT / "load-tests" / "results"
+SMOKE_RESULTS_DIR = PROJECT_ROOT / "load-tests" / "smoke-results"
 NODE = "/opt/homebrew/Cellar/node/26.3.0/bin/node"
 PORT = 3000
 HOST = "127.0.0.1"
@@ -206,6 +207,7 @@ def main() -> int:
     kill_existing()
     clear_logs()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    SMOKE_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     # Remove any result files from prior attempts so latest_result() cannot
     # return a stale all-zero snapshot from a previous (failed) run.
     for f in RESULTS_DIR.glob("http-sessions-*.json"):
@@ -264,6 +266,15 @@ def main() -> int:
 
     kill_server(pid)
     log("server stopped")
+
+    # Keep a per-smoke copy in smoke-results/ so the canonical artifact history
+    # is easy to inspect without polluting the main results/ dir.
+    try:
+        for src in RESULTS_DIR.glob("http-sessions-*.json"):
+            dst = SMOKE_RESULTS_DIR / src.name
+            dst.write_text(src.read_text())
+    except OSError as e:
+        log(f"could not copy to smoke-results/: {e}")
 
     res = latest_result()
     if res is None:
