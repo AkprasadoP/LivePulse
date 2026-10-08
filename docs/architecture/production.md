@@ -99,6 +99,39 @@ Verified: `POST /sessions` + `GET /sessions/:id` via :3200; WS
 `ws://127.0.0.1:3200/ws`; direct `:3100` kept during 9.2 for
 proxied-vs-direct comparison. No app, schema, pool, or PG change.
 
+## Two instances — Phase 9.3 (round-robin, no stickiness)
+
+`app-1` (`INSTANCE_ID=ws-a`, :3100) + `app-2` (`ws-b`, :3101) behind the
+same Nginx, plain round-robin, deliberately no `ip_hash` or sticky
+logic: placement must not matter, and the test verifies placement
+instead of assuming it — an `X-Upstream-App` response header echoes the
+serving upstream (`$upstream_addr`) so WS clients read it off the 101
+response. Direct ports stay for debugging, never for the test path.
+
+Critical test (scratch script, all traffic via :3200, since deleted):
+teacher creates session + quiz (HTTP), activates session (HTTP state →
+LIVE), starts quiz and publishes the question (WS) from instance A while
+the student sits on instance B. Every step passed with A≠B verified:
+
+- `question.published` received cross-instance; `quiz.answer` →
+  `answer.accepted` (`correct=true`) received cross-instance.
+- `doubt.create` → `doubt.created` and `doubt.resolve` → `doubt.resolved`
+  across instances (Redis propagation, PG persistence).
+- `presence.snapshot` observed on both sides (client frame name —
+  `presence.update` is the internal Redis notice type, never sent).
+- Student disconnect + re-`session.join` → `session.state` recovery
+  snapshot served (PG-backed, Phase 5 path through the proxy).
+- Lifecycle note: publish requires session LIVE then quiz ACTIVE
+  (`SESSION_NOT_LIVE` / `QUIZ_NOT_ACTIVE` otherwise) — enforced state
+  machine, not proxy behavior.
+
+Two test-harness lessons recorded: round-robin placement must be sampled
+(new connections until upstreams diverge, bounded retries — healthcheck
+traffic interleaves, so strict alternation can't be assumed), and the
+doubt wire shape uses `doubtId`, not `id`. No app, schema, pool, PG, or
+nginx-balancing change; killing an instance mid-session stays in
+Phase 9.7 failure testing.
+
 ## Limits (for later phases)
 
 Single app instance; no Nginx/load balancing; no TLS/auth/rate limiting;

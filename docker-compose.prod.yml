@@ -54,11 +54,16 @@ services:
       timeout: 3s
       retries: 10
 
-  app:
+  # Phase 9.3: two independent instances, pinned logical identities
+  # (INSTANCE_ID names the logical instance for echo suppression, tracing
+  # and ops — random per boot unless pinned). No sticky sessions anywhere:
+  # Nginx round-robins and Redis propagation + PG recovery must carry
+  # cross-instance correctness.
+  app-1:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: livepulse-app-prod
+    container_name: livepulse-app-1-prod
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,6 +72,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      INSTANCE_ID: ws-a
       # Service hostnames, NOT localhost — resolved on the Compose network.
       DATABASE_URL: postgresql://${POSTGRES_USER:-livepulse}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment before starting the production stack.}@postgres:5432/${POSTGRES_DB:-livepulse}
       REDIS_URL: redis://redis:6379
@@ -80,11 +86,38 @@ services:
     # SIGTERM must reach Node with time for in-flight requests + WS teardown.
     stop_grace_period: 30s
 
+  app-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: livepulse-app-2-prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      INSTANCE_ID: ws-b
+      DATABASE_URL: postgresql://${POSTGRES_USER:-livepulse}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment before starting the production stack.}@postgres:5432/${POSTGRES_DB:-livepulse}
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DISTRIBUTION_ENABLED: ${DISTRIBUTION_ENABLED:-true}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      WS_HEARTBEAT_INTERVAL_MS: ${WS_HEARTBEAT_INTERVAL_MS:-30000}
+      PRESENCE_DIGEST_INTERVAL_MS: ${PRESENCE_DIGEST_INTERVAL_MS:-10000}
+    ports:
+      - "127.0.0.1:3101:3000"
+    stop_grace_period: 30s
+
   nginx:
     image: nginx:1.28-alpine
     container_name: livepulse-nginx-prod
     depends_on:
-      app:
+      app-1:
+        condition: service_healthy
+      app-2:
         condition: service_healthy
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro

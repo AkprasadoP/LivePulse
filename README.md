@@ -176,6 +176,12 @@ the raw WebSocket upgrade (verified: session create/GET plus
 `session.join` → `session.joined` through the proxy; plain `GET /ws`
 still 426). Direct app access on :3100 stays for comparison.
 
+Phase 9.3 runs two instances (`app-1`/`app-2`, pinned `ws-a`/`ws-b`,
+round-robin, no stickiness): teacher on one instance and student on the
+other exchange question/answer/doubt/presence events across instances via
+Redis, with PG recovery on rejoin (placement verified per-connection via
+an `X-Upstream-App` header, never assumed).
+
 ## Health check
 
 ```bash
