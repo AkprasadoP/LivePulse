@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app/app.js";
 import { loadConfig } from "../../src/config/index.js";
-import { TEST_DATABASE_URL, resetDatabase, startIndependentInstance } from "./helpers.js";
+import { TEST_DATABASE_URL, resetDatabase, startIndependentInstance, WsTestClient } from "./helpers.js";
 import { PrismaClient } from "@prisma/client";
 
 /**
@@ -21,7 +21,7 @@ describe("readiness (Phase 9.5)", () => {
 
       const ready = await instance.app.inject({ method: "GET", url: "/ready" });
       expect(ready.statusCode).toBe(200);
-      expect(ready.json()).toEqual({ ready: true, postgres: "ok", redis: "ok" });
+      expect(ready.json()).toEqual({ ready: true, draining: false, postgres: "ok", redis: "ok" });
     } finally {
       await instance.close();
     }
@@ -43,7 +43,7 @@ describe("readiness (Phase 9.5)", () => {
       expect((await app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
       const ready = await app.inject({ method: "GET", url: "/ready" });
       expect(ready.statusCode).toBe(503);
-      expect(ready.json()).toEqual({ ready: false, postgres: "unavailable", redis: "ok" });
+      expect(ready.json()).toEqual({ ready: false, draining: false, postgres: "unavailable", redis: "ok" });
     } finally {
       await app.close();
     }
@@ -63,7 +63,7 @@ describe("readiness (Phase 9.5)", () => {
     try {
       const ready = await app.inject({ method: "GET", url: "/ready" });
       expect(ready.statusCode).toBe(200);
-      expect(ready.json()).toEqual({ ready: true, postgres: "ok", redis: "degraded" });
+      expect(ready.json()).toEqual({ ready: true, draining: false, postgres: "ok", redis: "degraded" });
 
       // Degraded is serving, not outage: session creation (PG-backed) works.
       const created = await app.inject({
@@ -89,9 +89,70 @@ describe("readiness (Phase 9.5)", () => {
     try {
       const ready = await instance.app.inject({ method: "GET", url: "/ready" });
       expect(ready.statusCode).toBe(200);
-      expect(ready.json()).toEqual({ ready: true, postgres: "ok", redis: "degraded" });
+      expect(ready.json()).toEqual({ ready: true, draining: false, postgres: "ok", redis: "degraded" });
     } finally {
       await instance.close();
     }
+  });
+});
+
+describe("draining (Phase 9.6)", () => {
+  it("D1 — beginDrain flips /ready to 503 draining:true, /health stays 200", async () => {
+    const instance = await startIndependentInstance("ws-drain-ready");
+    try {
+      instance.app.wsLayer?.beginDraining();
+      expect((await instance.app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+      const ready = await instance.app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json()).toEqual({
+        ready: false,
+        draining: true,
+        postgres: "ok",
+        redis: "ok",
+      });
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it("D2 — draining refuses NEW sockets but keeps an existing one open until close()", async () => {
+    const instance = await startIndependentInstance("ws-drain-sockets");
+    const existing = new WsTestClient();
+    const newcomer = new WsTestClient();
+    try {
+      await existing.connect(instance.port);
+      expect(existing.isOpen).toBe(true);
+
+      instance.app.wsLayer?.beginDraining();
+
+      // Existing connection survives the drain flag (deadline governs it).
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(existing.isOpen).toBe(true);
+
+      // New upgrade attempts are refused before any handshake bytes.
+      await expect(newcomer.connect(instance.port)).rejects.toThrow();
+
+      // Deadline path: close() still terminates existing sockets (1001).
+      const closed = existing.closed();
+      await instance.app.wsLayer?.close();
+      expect((await closed).code).toBe(1001);
+    } finally {
+      await instance.close().catch(() => {});
+    }
+  });
+
+  it("D3 — DRAIN_TIMEOUT_MS defaults to 10000 and rejects negatives", async () => {
+    const config = loadConfig({
+      DATABASE_URL: "postgresql://livepulse:livepulse@localhost:5433/livepulse",
+      REDIS_URL: "redis://localhost:6380",
+    });
+    expect(config.DRAIN_TIMEOUT_MS).toBe(10_000);
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: "postgresql://livepulse:livepulse@localhost:5433/livepulse",
+        REDIS_URL: "redis://localhost:6380",
+        DRAIN_TIMEOUT_MS: "-1",
+      }),
+    ).toThrow();
   });
 });

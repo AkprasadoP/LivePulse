@@ -64,6 +64,19 @@ export interface WebSocketLayer {
    * on cross-instance delivery.
    */
   distributionReady: Promise<void>;
+  /**
+   * Phase 9.6: draining flag. Set by beginDraining() on SIGTERM; read by
+   * /ready (reports unready) and the upgrade path (refuses new sockets).
+   * Existing connections are untouched until close().
+   */
+  readonly isDraining: boolean;
+  /**
+   * Phase 9.6: enter draining — refuse NEW upgrade attempts immediately
+   * (socket destroyed before any handshake bytes: no registry entry, no
+   * presence churn, no close frame to misread as a normal goodbye).
+   * Existing connections stay open until close() runs at the drain deadline.
+   */
+  beginDraining(): void;
 }
 
 const WS_PATH = "/ws";
@@ -90,6 +103,8 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   const { config, httpServer, app } = options;
   const metrics = app.metrics ?? undefined;
   const registry = new SessionRegistry();
+  // Phase 9.6 drain flag: checked synchronously per upgrade attempt.
+  let draining = false;
   const sessionRepository = new SessionRepository(app.prisma);
   const quizRepository = new QuizRepository(app.prisma);
   const answerRepository = new AnswerRepository(app.prisma);
@@ -268,6 +283,14 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       socket.destroy();
       return;
     }
+    if (draining) {
+      // Planned shutdown in progress: never admit a connection we are about
+      // to terminate. Destroy (not a polite close — there is no Connection
+      // yet, and a 1012 here would still churn registry/presence). The
+      // client reconnects through Nginx to a healthy instance.
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit("connection", ws, request);
     });
@@ -414,6 +437,12 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     distributor,
     distributionReady,
     redis,
+    beginDraining() {
+      draining = true;
+    },
+    get isDraining() {
+      return draining;
+    },
     get connectionCount() {
       return registry.connectionCount;
     },

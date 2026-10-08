@@ -15,10 +15,14 @@ export interface ReadyRoutesOptions {
 /**
  * GET /ready — traffic readiness (distinct from /health liveness).
  *
- * - 200 `ready:true` iff PostgreSQL answers. Redis NEVER flips the code:
- *   both connections ready → `redis:"ok"`, anything else → `"degraded"`
- *   (local serving continues; cross-instance propagation is degraded).
- * - 503 `ready:false, postgres:"unavailable"` when PostgreSQL is unreachable.
+ * - 200 `ready:true` iff PostgreSQL answers and the instance is not
+ *   draining. Redis NEVER flips the code: both connections ready →
+ *   `redis:"ok"`, anything else → `"degraded"` (local serving continues;
+ *   cross-instance propagation is degraded).
+ * - 503 when PostgreSQL is unreachable OR the instance is draining
+ *   (planned SIGTERM shutdown: `draining:true` tells orchestrators and
+ *   reconnecting clients this peer is going away — distinct from a
+ *   dependency outage, so it is an explicit field rather than overload).
  * - Fixed enum strings only — no connection strings, errors, hostnames, or
  *   stack traces ever leave the process.
  *
@@ -58,8 +62,14 @@ export async function readyRoutes(
     const redisOk =
       redis !== undefined && redis !== null ? redis.publisherReady && redis.subscriberReady : false;
 
-    return reply.code(postgresOk ? 200 : 503).send({
-      ready: postgresOk,
+    // Planned shutdown outranks dependency state: a draining instance is not
+    // a traffic target even with every dependency green.
+    const draining = app.wsLayer?.isDraining ?? false;
+    const ready = postgresOk && !draining;
+
+    return reply.code(ready ? 200 : 503).send({
+      ready,
+      draining,
       postgres: postgresOk ? "ok" : "unavailable",
       redis: redisOk ? "ok" : "degraded",
     });

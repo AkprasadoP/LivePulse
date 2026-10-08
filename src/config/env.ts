@@ -65,6 +65,14 @@ export const envSchema = z.object({
    */
   PRESENCE_DIGEST_INTERVAL_MS: z.coerce.number().int().min(50).max(600_000).default(10_000),
   /**
+   * Phase 9.6 graceful draining: after SIGTERM, the instance stops accepting
+   * NEW WebSocket connections and reports unready (/ready 503) while existing
+   * connections finish for up to this long before teardown. Must fit inside
+   * the orchestrator's stop grace period (compose: 30 s). Zero means the
+   * previous immediate-teardown behavior.
+   */
+  DRAIN_TIMEOUT_MS: z.coerce.number().int().min(0).max(600_000).default(10_000),
+  /**
    * Phase 7 observability: whether GET /metrics is registered. Unauthenticated
    * by design (ops/dev endpoint; auth arrives in a later phase). Default on.
    */

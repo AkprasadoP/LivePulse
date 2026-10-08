@@ -36,6 +36,18 @@ async function main(): Promise<void> {
     shuttingDown = true;
     app.log.info({ signal }, "Graceful shutdown starting");
     try {
+      // Phase 9.6 draining: stop admitting NEW work first — the WS layer
+      // refuses upgrades and /ready flips to 503 (draining:true) so Nginx
+      // and reconnecting clients pick a healthy instance — while EXISTING
+      // connections finish for up to DRAIN_TIMEOUT_MS. Only then does
+      // app.close() run the pre-existing teardown (in-flight HTTP drains,
+      // presence withdrawal, 1001 socket closes, distributor close).
+      app.wsLayer?.beginDraining();
+      app.log.info(
+        { drainTimeoutMs: config.DRAIN_TIMEOUT_MS },
+        "Draining: no new WebSocket connections until shutdown",
+      );
+      await new Promise((resolve) => setTimeout(resolve, config.DRAIN_TIMEOUT_MS));
       // app.close() runs Fastify lifecycle hooks in order: stop accepting
       // connections, await in-flight requests, close WS layer, onClose hooks
       // ($disconnect etc.).

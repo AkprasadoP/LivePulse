@@ -182,6 +182,13 @@ other exchange question/answer/doubt/presence events across instances via
 Redis, with PG recovery on rejoin (placement verified per-connection via
 an `X-Upstream-App` header, never assumed).
 
+Phase 9.5 adds `GET /ready` (200 iff PostgreSQL answers; Redis reports
+`ok`/`degraded` without flipping the code; PG down → 503 while
+`/health` stays 200). Phase 9.6 drains planned stops: SIGTERM flips
+`/ready` to 503 `draining:true`, refuses new WebSockets, keeps existing
+ones until `DRAIN_TIMEOUT_MS` (10 s), then closes politely (1001) —
+SIGKILL stays abrupt (1006, ~200 ms) for catastrophic loss.
+
 ## Health check
 
 ```bash

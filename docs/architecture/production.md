@@ -195,6 +195,55 @@ via `docker network inspect`). Rule going forward: refresh the IP→service
 map immediately before each run; combined `a, b` header values mean an
 internal nginx retry happened. No product behavior involved.
 
+## Graceful draining — Phase 9.6 (planned SIGTERM, not SIGKILL)
+
+Existing connections don't "finish" like HTTP requests, so draining is
+defined explicitly: **no new admissions, existing sockets live until a
+deadline, then a polite close clients reconnect from.** New `DRAIN_TIMEOUT_MS`
+(default 10 s, fits the 30 s compose grace):
+
+```text
+SIGTERM → beginDraining() → /ready 503 draining:true (≤300 ms measured)
+        → upgrade attempts destroyed pre-handshake (no registry/presence churn)
+        → existing WS untouched until the deadline
+        → pre-existing close(): presence withdrawal, 1001 closes, distributor close
+```
+
+`/ready` gains an always-present `draining` boolean (explicit field, not
+overloaded onto postgres/redis). Refusal is `socket.destroy()`, not a 1012:
+there is no Connection yet, and a handshake-then-close would churn
+registry/presence for a socket about to die — clients see a transport
+error and reconnect elsewhere.
+
+Measured live (`docker stop -t 30`, teacher draining, student survivor):
+ready flip 264–265 ms; new WS refused immediately; existing WS open at
++267 ms; **polite 1001 at +10,050 ms** (server/client timestamps
+ms-identical); `docker stop` returns ~10.2 s; reconnect 2 attempts /
+~10.5 s to survivor; standings recovered from PG. Contrast SIGKILL (9.4):
+1006 in ~200 ms with no warning window. Drain does NOT shorten
+post-stop reconnect (~10.5 s both) — it moves disruption earlier and
+politely: reconnects can happen *during* the window instead of all at
+once after abrupt death.
+
+Contract tests: `readiness.test.ts` D1 (ready flip, health stays 200),
+D2 (refuse-new / keep-existing / close-still-1001), D3 (default
+10 s, rejects negatives). A probe-harness lesson is recorded here too:
+my first script's connect helper never resolved transport errors, only
+timeouts — making a millisecond refusal look like a 10 s hang. Resolve
+errors explicitly.
+
+> **This is not zero-downtime WebSocket deployment.** At the deadline,
+> existing sockets still break (1001 → reconnect → PG recovery). What
+> draining buys is intention and observability: a ready-signal,
+> immediate refusal of new admissions, and a known polite close — instead
+> of abrupt death. Fast *state recovery* (not socket preservation) is the
+> architectural tradeoff LivePulse deliberately makes.
+
+Not claimed: zero-downtime deployment (existing sockets still break at
+the deadline by design); nginx awareness of draining (OSS passive only —
+new connections may still be offered to the draining peer and refused,
+which is correct but chatty).
+
 ## Instance failure + recovery — Phase 9.4 (`docker kill`, no new mechanisms)
 
 Topology above with `app-1` (ws-a, .4) + `app-2` (ws-b, .5). Failure =
