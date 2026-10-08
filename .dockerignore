@@ -1,4 +1,32 @@
+# Build context for the production image (Phase 9.1).
+# Keep the build reproducible and free of secrets, history, and test output.
+# The Dockerfile ALSO uses selective COPY, so this is defense in depth —
+# neither layer may silently depend on the other.
+
 node_modules
 dist
+.git
 .env
+.env.*
 *.log
+npm-debug.log*
+
+# Test / benchmark artifacts (never part of the image)
+coverage/
+tests/
+load-tests/results/
+load-tests/smoke-results/
+.smoke-results/
+
+# Tool-local metadata
+.kilo/
+.freebuff/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local-only compose overrides (operator files, not build inputs)
+docker-compose.override.yml

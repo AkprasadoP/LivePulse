@@ -1,0 +1,84 @@
+# Phase 9.1 production-style stack: PostgreSQL + Redis + ONE LivePulse app.
+#
+# The development workflow (docker-compose.yml: PG on host 5433, Redis on
+# host 6380) is deliberately untouched. This file uses different host ports
+# (app 3100, PG 5434, Redis 6381, all bound to 127.0.0.1) so both stacks can
+# coexist and nothing collides.
+#
+# Service names (postgres, redis) are hostnames on the Compose network —
+# the app talks to `postgres:5432` / `redis:6379`, never localhost.
+# Host ports exist only for operator access (psql, redis-cli, curl, and
+# host-side `prisma migrate deploy`); container-to-container traffic stays
+# on the internal network.
+#
+# Secrets: POSTGRES_PASSWORD has NO default and is never committed — it must
+# come from the environment (or a .env file, which is gitignored). It must be
+# URL-safe (URL-encode : @ / ? # if present) because it is interpolated into
+# DATABASE_URL.
+#
+# `name:` isolates this stack from the development Compose project sharing
+# this directory: without it, `docker compose down` on one file removes the
+# other stack's containers (same default project name).
+
+name: livepulse-prod
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: livepulse-postgres-prod
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-livepulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment before starting the production stack.}
+      POSTGRES_DB: ${POSTGRES_DB:-livepulse}
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - postgres-prod-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-livepulse} -d ${POSTGRES_DB:-livepulse}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: livepulse-redis-prod
+    # Same posture as development: no persistence directives — Redis carries
+    # cross-instance notifications and ephemeral presence only, never durable
+    # business state.
+    ports:
+      - "127.0.0.1:6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: livepulse-app-prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Service hostnames, NOT localhost — resolved on the Compose network.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-livepulse}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment before starting the production stack.}@postgres:5432/${POSTGRES_DB:-livepulse}
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DISTRIBUTION_ENABLED: ${DISTRIBUTION_ENABLED:-true}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      WS_HEARTBEAT_INTERVAL_MS: ${WS_HEARTBEAT_INTERVAL_MS:-30000}
+      PRESENCE_DIGEST_INTERVAL_MS: ${PRESENCE_DIGEST_INTERVAL_MS:-10000}
+    ports:
+      - "127.0.0.1:3100:3000"
+    # SIGTERM must reach Node with time for in-flight requests + WS teardown.
+    stop_grace_period: 30s
+
+volumes:
+  postgres-prod-data:

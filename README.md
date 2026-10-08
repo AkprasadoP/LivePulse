@@ -147,6 +147,29 @@ pnpm prisma:generate        # generate the Prisma client
 pnpm prisma:migrate         # create/apply a dev migration (needs db:up)
 ```
 
+## Production container (Phase 9.1)
+
+The backend ships as a minimal non-root image (`node dist/server.js`,
+`Dockerfile` multi-stage: toolchain + compile in build, prod-deps +
+`dist/` only at runtime). One app container plus Postgres/Redis via
+`docker-compose.prod.yml` (isolated `livepulse-prod` project; host ports
+3100/5434/6381 on 127.0.0.1 so the dev stack on 3000/5433/6380 is
+untouched; services talk over `postgres`/`redis` hostnames).
+
+```bash
+export POSTGRES_PASSWORD="<local-only, URL-safe, never committed>"
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml up -d
+# fresh volume only, once (container never migrates on boot):
+DATABASE_URL="postgresql://livepulse:<password>@127.0.0.1:5434/livepulse" \
+  pnpm exec prisma migrate deploy
+curl -s http://127.0.0.1:3100/health   # → {"status":"ok"}
+```
+
+Full design, migration workflow, verification log and limits:
+`docs/architecture/production.md`. Single instance only — Nginx, replicas,
+TLS and auth arrive in later phases.
+
 ## Health check
 
 ```bash
