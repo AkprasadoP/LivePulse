@@ -7,6 +7,7 @@ import {
   connectToInstance,
   joinAs,
   registerAndCreateSession,
+  bearerHeaders,
   WsTestClient,
   waitForAsync,
   type IndependentInstance,
@@ -30,13 +31,17 @@ describe("Cross-instance distribution (integration)", () => {
       method: "GET" | "POST",
       url: string,
       payload?: unknown,
+      headers?: Record<string, string>,
     ): Promise<{ statusCode: number; body: any }> => {
       const response = await instance.app.inject({
         method,
         url,
         ...(payload === undefined
           ? {}
-          : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+          : {
+              payload: JSON.stringify(payload),
+              headers: { "content-type": "application/json", ...(headers ?? {}) },
+            }),
       });
       let body: any = response.body;
       try {
@@ -56,19 +61,31 @@ describe("Cross-instance distribution (integration)", () => {
     const correctAnswer = "Berlin";
     // Phase 10.7: creation requires an authenticated owner; the registered
     // creator identity (teacherName) is reused by joinAs below.
-    const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
-      a.app,
-      `Dist ${Date.now()}`,
-    );
+    const {
+      sessionId,
+      creatorDisplayName: teacherName,
+      accessToken,
+    } = await registerAndCreateSession(a.app, `Dist ${Date.now()}`);
 
-    const quizResponse = await requestA("POST", `/sessions/${sessionId}/quizzes`, {
-      title: "Distribution quiz",
-      questions: [{ prompt: "Q1", correctAnswer }],
-    });
+    // Phase 11: quiz/state are creator-only, so use the owner's token.
+    const quizResponse = await requestA(
+      "POST",
+      `/sessions/${sessionId}/quizzes`,
+      {
+        title: "Distribution quiz",
+        questions: [{ prompt: "Q1", correctAnswer }],
+      },
+      bearerHeaders(accessToken),
+    );
     expect(quizResponse.statusCode).toBe(201);
     const quiz = quizResponse.body.quiz as { id: string; questions: Array<{ id: string }> };
 
-    const live = await requestA("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+    const live = await requestA(
+      "POST",
+      `/sessions/${sessionId}/state`,
+      { state: "LIVE" },
+      bearerHeaders(accessToken),
+    );
     expect(live.statusCode).toBe(200);
     void b;
     // correctAnswer stays non-hex ("Berlin") so the no-leak assertion in
@@ -371,26 +388,42 @@ describe("Redis-unavailable degradation (integration)", () => {
     const solo = await startIndependentInstance("ws-solo", { distributionEnabled: false });
     const peer = await startIndependentInstance("ws-peer");
 
-    const requestSolo = async (method: "GET" | "POST", url: string, payload?: unknown) => {
+    const requestSolo = async (
+      method: "GET" | "POST",
+      url: string,
+      payload?: unknown,
+      headers?: Record<string, string>,
+    ) => {
       const response = await solo.app.inject({
         method,
         url,
         ...(payload === undefined
           ? {}
-          : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+          : {
+              payload: JSON.stringify(payload),
+              headers: { "content-type": "application/json", ...(headers ?? {}) },
+            }),
       });
       return { statusCode: response.statusCode, body: response.json() as any };
     };
-    const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
-      solo.app,
-      `Solo ${Date.now()}`,
+    const {
+      sessionId,
+      creatorDisplayName: teacherName,
+      accessToken,
+    } = await registerAndCreateSession(solo.app, `Solo ${Date.now()}`);
+    const quizResponse = await requestSolo(
+      "POST",
+      `/sessions/${sessionId}/quizzes`,
+      { title: "Solo quiz", questions: [{ prompt: "Q", correctAnswer: "42" }] },
+      bearerHeaders(accessToken),
     );
-    const quizResponse = await requestSolo("POST", `/sessions/${sessionId}/quizzes`, {
-      title: "Solo quiz",
-      questions: [{ prompt: "Q", correctAnswer: "42" }],
-    });
     const quiz = quizResponse.body.quiz as { id: string; questions: Array<{ id: string }> };
-    await requestSolo("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+    await requestSolo(
+      "POST",
+      `/sessions/${sessionId}/state`,
+      { state: "LIVE" },
+      bearerHeaders(accessToken),
+    );
 
     const teacher = await connectToInstance(solo);
     const student = await connectToInstance(solo);

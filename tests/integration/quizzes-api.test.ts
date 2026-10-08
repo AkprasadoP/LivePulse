@@ -4,13 +4,19 @@ import {
   stopTestApp,
   resetDatabase,
   registerAndCreateSession,
+  bearerHeaders,
   type IntegrationContext,
 } from "./helpers.js";
 
-async function createSession(ctx: IntegrationContext, name = "Quiz session"): Promise<string> {
+/** Create a session owned by a fresh user; return its id + the owner's headers. */
+async function createSession(
+  ctx: IntegrationContext,
+  name = "Quiz session",
+): Promise<{ sessionId: string; headers: Record<string, string> }> {
   // Phase 10.7: POST /sessions requires authentication; the creator owns it.
-  const { sessionId } = await registerAndCreateSession(ctx.app, name);
-  return sessionId;
+  // Phase 11: quiz creation is creator-only, so the same token is returned.
+  const { sessionId, accessToken } = await registerAndCreateSession(ctx.app, name);
+  return { sessionId, headers: bearerHeaders(accessToken) };
 }
 
 describe("Quizzes API (integration)", () => {
@@ -30,16 +36,21 @@ describe("Quizzes API (integration)", () => {
 
   describe("POST /sessions/:sessionId/quizzes", () => {
     it("creates a quiz with inline questions in DRAFT state", async () => {
-      const sessionId = await createSession(ctx);
+      const { sessionId, headers } = await createSession(ctx);
 
-      const { statusCode, body } = await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {
-        title: "Electricity basics",
-        questions: [
-          { prompt: "Unit of current?", correctAnswer: "Ampere" },
-          { prompt: "Ohm's law?", correctAnswer: "V = IR" },
-          { prompt: "Open question without a key" },
-        ],
-      });
+      const { statusCode, body } = await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {
+          title: "Electricity basics",
+          questions: [
+            { prompt: "Unit of current?", correctAnswer: "Ampere" },
+            { prompt: "Ohm's law?", correctAnswer: "V = IR" },
+            { prompt: "Open question without a key" },
+          ],
+        },
+        headers,
+      );
 
       expect(statusCode).toBe(201);
       expect(body.quiz).toMatchObject({
@@ -62,20 +73,30 @@ describe("Quizzes API (integration)", () => {
     });
 
     it("creates a quiz without questions", async () => {
-      const sessionId = await createSession(ctx);
-      const { statusCode, body } = await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {
-        title: "Empty quiz",
-      });
+      const { sessionId, headers } = await createSession(ctx);
+      const { statusCode, body } = await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {
+          title: "Empty quiz",
+        },
+        headers,
+      );
       expect(statusCode).toBe(201);
       expect(body.quiz.questions).toHaveLength(0);
     });
 
     it("persists questions atomically with the quiz and hides correctAnswer from the API", async () => {
-      const sessionId = await createSession(ctx);
-      const { body } = await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {
-        title: "Secrecy check",
-        questions: [{ prompt: "Secret answer question", correctAnswer: "classified" }],
-      });
+      const { sessionId, headers } = await createSession(ctx);
+      const { body } = await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {
+          title: "Secrecy check",
+          questions: [{ prompt: "Secret answer question", correctAnswer: "classified" }],
+        },
+        headers,
+      );
 
       const raw = await ctx.prisma.question.findFirst({
         where: { quizId: body.quiz.id },
@@ -87,45 +108,72 @@ describe("Quizzes API (integration)", () => {
     });
 
     it("returns 404 when the session does not exist (and creates nothing)", async () => {
+      const { headers } = await createSession(ctx);
       const unknownId = "01900000-0000-7000-8000-000000000003";
-      const { statusCode } = await ctx.request("POST", `/sessions/${unknownId}/quizzes`, {
-        title: "Orphan",
-      });
+      const { statusCode } = await ctx.request(
+        "POST",
+        `/sessions/${unknownId}/quizzes`,
+        {
+          title: "Orphan",
+        },
+        headers,
+      );
       expect(statusCode).toBe(404);
       expect(await ctx.prisma.quiz.count()).toBe(0);
     });
 
     it("rejects a missing title with 400", async () => {
-      const sessionId = await createSession(ctx);
-      const { statusCode, body } = await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {});
+      const { sessionId, headers } = await createSession(ctx);
+      const { statusCode, body } = await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {},
+        headers,
+      );
       expect(statusCode).toBe(400);
       expect(body.details.some((d: any) => d.path === "title")).toBe(true);
     });
 
     it("rejects an empty question prompt with 400", async () => {
-      const sessionId = await createSession(ctx);
-      const { statusCode } = await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {
-        title: "Bad question",
-        questions: [{ prompt: "" }],
-      });
+      const { sessionId, headers } = await createSession(ctx);
+      const { statusCode } = await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {
+          title: "Bad question",
+          questions: [{ prompt: "" }],
+        },
+        headers,
+      );
       expect(statusCode).toBe(400);
     });
 
     it("rejects a malformed session id with 400 before hitting the database", async () => {
-      const { statusCode } = await ctx.request("POST", "/sessions/123/quizzes", {
-        title: "Bad id",
-      });
+      const { headers } = await createSession(ctx);
+      const { statusCode } = await ctx.request(
+        "POST",
+        "/sessions/123/quizzes",
+        {
+          title: "Bad id",
+        },
+        headers,
+      );
       expect(statusCode).toBe(400);
     });
   });
 
   describe("GET /quizzes/:quizId", () => {
     it("returns the quiz with questions ordered by position", async () => {
-      const sessionId = await createSession(ctx);
-      const created = await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {
-        title: "Ordered quiz",
-        questions: [{ prompt: "Q3" }, { prompt: "Q1" }, { prompt: "Q2" }],
-      });
+      const { sessionId, headers } = await createSession(ctx);
+      const created = await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {
+          title: "Ordered quiz",
+          questions: [{ prompt: "Q3" }, { prompt: "Q1" }, { prompt: "Q2" }],
+        },
+        headers,
+      );
       const quizId = created.body.quiz.id;
 
       const { statusCode, body } = await ctx.request("GET", `/quizzes/${quizId}`);

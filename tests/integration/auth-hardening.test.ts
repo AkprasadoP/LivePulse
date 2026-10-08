@@ -9,6 +9,7 @@ import {
   connectToInstance,
   joinAs,
   registerAndCreateSession,
+  bearerHeaders,
   WsTestClient,
   type IndependentInstance,
 } from "./helpers.js";
@@ -42,12 +43,17 @@ async function clean(): Promise<void> {
   await resetDatabase(prisma);
 }
 
-function post(instance: IndependentInstance, url: string, body: unknown) {
+function post(
+  instance: IndependentInstance,
+  url: string,
+  body: unknown,
+  headers?: Record<string, string>,
+) {
   return instance.app.inject({
     method: "POST",
     url,
     payload: JSON.stringify(body),
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(headers ?? {}) },
   });
 }
 
@@ -73,8 +79,17 @@ async function registerUser(
 
 /** Session moved to LIVE (creator registered as its TEACHER). */
 async function makeLiveSession(instance: IndependentInstance): Promise<string> {
-  const { sessionId } = await registerAndCreateSession(instance.app, `HardLive ${stamp()}`);
-  const live = await post(instance, `/sessions/${sessionId}/state`, { state: "LIVE" });
+  const { sessionId, accessToken } = await registerAndCreateSession(
+    instance.app,
+    `HardLive ${stamp()}`,
+  );
+  // Phase 11: the state transition is creator-only.
+  const live = await post(
+    instance,
+    `/sessions/${sessionId}/state`,
+    { state: "LIVE" },
+    bearerHeaders(accessToken),
+  );
   expect(live.statusCode).toBe(200);
   return sessionId;
 }
@@ -88,17 +103,29 @@ async function makeQuestionScenario(instance: IndependentInstance): Promise<{
   correctAnswer: string;
 }> {
   const correctAnswer = "Berlin";
-  const { sessionId, creatorDisplayName: teacherDisplayName } = await registerAndCreateSession(
-    instance.app,
-    `Hardening ${stamp()}`,
+  const {
+    sessionId,
+    creatorDisplayName: teacherDisplayName,
+    accessToken,
+  } = await registerAndCreateSession(instance.app, `Hardening ${stamp()}`);
+  // Phase 11: quiz/state are creator-only, so use the owner's token.
+  const quizRes = await post(
+    instance,
+    `/sessions/${sessionId}/quizzes`,
+    {
+      title: "Hardening quiz",
+      questions: [{ prompt: "Capital of Germany?", correctAnswer }],
+    },
+    bearerHeaders(accessToken),
   );
-  const quizRes = await post(instance, `/sessions/${sessionId}/quizzes`, {
-    title: "Hardening quiz",
-    questions: [{ prompt: "Capital of Germany?", correctAnswer }],
-  });
   expect(quizRes.statusCode).toBe(201);
   const quiz = (quizRes.json() as any).quiz as { id: string; questions: Array<{ id: string }> };
-  const live = await post(instance, `/sessions/${sessionId}/state`, { state: "LIVE" });
+  const live = await post(
+    instance,
+    `/sessions/${sessionId}/state`,
+    { state: "LIVE" },
+    bearerHeaders(accessToken),
+  );
   expect(live.statusCode).toBe(200);
   return {
     sessionId,

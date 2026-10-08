@@ -7,6 +7,7 @@ import {
   connectToInstance,
   joinAs,
   registerAndCreateSession,
+  bearerHeaders,
   waitForAsync,
   WsTestClient,
   type IndependentInstance,
@@ -77,13 +78,17 @@ function requestOn(instance: IndependentInstance) {
     method: "GET" | "POST",
     url: string,
     payload?: unknown,
+    headers?: Record<string, string>,
   ): Promise<{ statusCode: number; body: any }> => {
     const response = await instance.app.inject({
       method,
       url,
       ...(payload === undefined
         ? {}
-        : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+        : {
+            payload: JSON.stringify(payload),
+            headers: { "content-type": "application/json", ...(headers ?? {}) },
+          }),
     });
     let body: any = response.body;
     try {
@@ -110,18 +115,33 @@ async function makeScenario(instance: IndependentInstance): Promise<Scenario> {
   const correctAnswer = "Berlin";
   // Phase 10.7: creation requires an authenticated owner; the registered
   // creator identity (teacherName) is reused by joinAs below.
-  const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
+  const {
+    sessionId,
+    creatorDisplayName: teacherName,
+    accessToken,
+  } = await registerAndCreateSession(
     instance.app,
     `Recovery ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
   );
 
-  const quizResponse = await request("POST", `/sessions/${sessionId}/quizzes`, {
-    title: "Recovery quiz",
-    questions: [{ prompt: "Capital of Germany?", correctAnswer }],
-  });
+  // Phase 11: quiz/state are creator-only, so use the owner's token.
+  const quizResponse = await request(
+    "POST",
+    `/sessions/${sessionId}/quizzes`,
+    {
+      title: "Recovery quiz",
+      questions: [{ prompt: "Capital of Germany?", correctAnswer }],
+    },
+    bearerHeaders(accessToken),
+  );
   expect(quizResponse.statusCode).toBe(201);
   const quiz = quizResponse.body.quiz as { id: string; questions: Array<{ id: string }> };
-  await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+  await request(
+    "POST",
+    `/sessions/${sessionId}/state`,
+    { state: "LIVE" },
+    bearerHeaders(accessToken),
+  );
 
   return {
     sessionId,
@@ -647,7 +667,7 @@ describe("Recovery edge cases (integration, Phase 5)", () => {
 
   it("recovery is null before any quiz exists; DRAFT questions never appear in the snapshot", async () => {
     const request = requestOn(wsA);
-    const { sessionId } = await registerAndCreateSession(
+    const { sessionId, accessToken } = await registerAndCreateSession(
       wsA.app,
       `Edge ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     );
@@ -658,10 +678,15 @@ describe("Recovery edge cases (integration, Phase 5)", () => {
 
     // A quiz exists now; a second connection gets a snapshot with quizzes,
     // but DRAFT questions never appear as the current question.
-    await request("POST", `/sessions/${sessionId}/quizzes`, {
-      title: "Late quiz",
-      questions: [{ prompt: "Q", correctAnswer: "42" }],
-    });
+    await request(
+      "POST",
+      `/sessions/${sessionId}/quizzes`,
+      {
+        title: "Late quiz",
+        questions: [{ prompt: "Q", correctAnswer: "42" }],
+      },
+      bearerHeaders(accessToken),
+    );
     const second = await connectToInstance(wsA);
     const joined2 = await joinAs(second, sessionId, "Student-1");
     const recovery = recoveryOf(joined2.recovery);
@@ -677,14 +702,19 @@ describe("Recovery edge cases (integration, Phase 5)", () => {
 
   it("view-only joins get a snapshot without ownAnswer", async () => {
     const request = requestOn(wsA);
-    const { sessionId } = await registerAndCreateSession(
+    const { sessionId, accessToken } = await registerAndCreateSession(
       wsA.app,
       `View ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     );
-    await request("POST", `/sessions/${sessionId}/quizzes`, {
-      title: "Viewed quiz",
-      questions: [{ prompt: "Q", correctAnswer: "42" }],
-    });
+    await request(
+      "POST",
+      `/sessions/${sessionId}/quizzes`,
+      {
+        title: "Viewed quiz",
+        questions: [{ prompt: "Q", correctAnswer: "42" }],
+      },
+      bearerHeaders(accessToken),
+    );
 
     const viewer = await connectToInstance(wsA);
     const joined = await joinAs(viewer, sessionId); // no participant: view-only

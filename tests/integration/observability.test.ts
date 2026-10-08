@@ -10,6 +10,7 @@ import {
   connectToInstance,
   joinAs,
   registerAndCreateSession,
+  bearerHeaders,
   waitFor,
   type IndependentInstance,
 } from "./helpers.js";
@@ -60,13 +61,17 @@ function requestOn(instance: IndependentInstance) {
     method: "GET" | "POST",
     url: string,
     payload?: unknown,
+    headers?: Record<string, string>,
   ): Promise<{ statusCode: number; body: any; raw: string }> => {
     const response = await instance.app.inject({
       method,
       url,
       ...(payload === undefined
         ? {}
-        : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+        : {
+            payload: JSON.stringify(payload),
+            headers: { "content-type": "application/json", ...(headers ?? {}) },
+          }),
     });
     let body: any = response.body;
     try {
@@ -98,18 +103,33 @@ async function makeScenario(instance: IndependentInstance) {
   // Phase 10.7: creation requires an authenticated owner. Joining with the
   // registered creator's display name resolves the TEACHER participant; a
   // fresh name would be a STUDENT.
-  const { sessionId, creatorDisplayName: teacherDisplayName } = await registerAndCreateSession(
+  const {
+    sessionId,
+    creatorDisplayName: teacherDisplayName,
+    accessToken,
+  } = await registerAndCreateSession(
     instance.app,
     `Observability ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
   );
 
-  const quizResponse = await request("POST", `/sessions/${sessionId}/quizzes`, {
-    title: "Observability quiz",
-    questions: [{ prompt: "Secret prompt sentinel", correctAnswer }],
-  });
+  // Phase 11: quiz/state are creator-only, so use the owner's token.
+  const quizResponse = await request(
+    "POST",
+    `/sessions/${sessionId}/quizzes`,
+    {
+      title: "Observability quiz",
+      questions: [{ prompt: "Secret prompt sentinel", correctAnswer }],
+    },
+    bearerHeaders(accessToken),
+  );
   expect(quizResponse.statusCode).toBe(201);
   const quiz = quizResponse.body.quiz as { id: string; questions: Array<{ id: string }> };
-  await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+  await request(
+    "POST",
+    `/sessions/${sessionId}/state`,
+    { state: "LIVE" },
+    bearerHeaders(accessToken),
+  );
 
   return {
     sessionId,

@@ -346,12 +346,30 @@ which is correct but chatty).
 
 ## Limits (residual — what production still lacks)
 
-No TLS/auth/rate limiting; metrics unauthenticated as in development;
-no autoscaling/orchestration beyond Compose (health/readiness are
-container-local signals); host-port operator access is a local
-convenience, not a deployment model; the failure matrix's explicitly
-untested rows (simultaneous loss, split-brain, mid-commit kill) remain
-untested. Authentication + authorization is the planned Phase 10.
+- **No TLS termination** in this stack (Nginx listens on plain HTTP; TLS is a
+  deployment-fronting concern, not added here), and **no rate limiting** —
+  login/registration/WS floods are bounded only by payload caps and Argon2id
+  cost (see `docs/api/authentication.md` §8).
+- **`/metrics` remains unauthenticated** by design (ops/dev endpoint on the
+  app port). Keep it behind the operator network / proxy ACLs;
+  `METRICS_ENABLED=false` removes it entirely.
+- **Secrets/config posture (Phase 11):** the only secrets are
+  `POSTGRES_PASSWORD` and `AUTH_ACCESS_SECRET`; both are required with **no
+  default** (production startup fails without `AUTH_ACCESS_SECRET`) and are
+  never committed (`.env*` gitignored; `.env.prod.example`/`.env.example`
+  carry empty placeholders only). The runtime image runs as `USER node`
+  (non-root) and ships compiled output + production deps only (no source, no
+  dev tooling, no `.env`). PostgreSQL (`5434`) and Redis (`6381`) host ports
+  are bound to `127.0.0.1` for operator access only; container traffic stays
+  on the internal Compose network. Redis keeps **no persistence directives**
+  — it is never durable truth.
+- No autoscaling/orchestration beyond Compose (health/readiness are
+  container-local signals); host-port operator access is a local
+  convenience, not a deployment model; the failure matrix's explicitly
+  untested rows (simultaneous loss, split-brain, mid-commit kill) remain
+  untested.
+- Authentication (Phase 10) and authorization (Phase 10.6 / Phase 11 HTTP
+  control plane) are implemented; see `docs/api/authentication.md`.
 
 ## Design property: Redis data loss on restart is acceptable
 

@@ -531,19 +531,31 @@ export async function createLiveQuizScenario(
   if (created.statusCode !== 201) throw new Error(`session create failed: ${created.statusCode}`);
   const sessionId = created.body.session.id as string;
 
-  const quizResponse = await request("POST", `/sessions/${sessionId}/quizzes`, {
-    title: "Race quiz",
-    questions: Array.from({ length: questionCount }, (_, i) => ({
-      prompt: `Question ${i + 1}: what is the answer?`,
-      ...questionBody,
-    })),
-  });
+  // Phase 11: the quiz and state routes are creator-only, so the owner's
+  // token must accompany these control-plane calls.
+  const quizResponse = await request(
+    "POST",
+    `/sessions/${sessionId}/quizzes`,
+    {
+      title: "Race quiz",
+      questions: Array.from({ length: questionCount }, (_, i) => ({
+        prompt: `Question ${i + 1}: what is the answer?`,
+        ...questionBody,
+      })),
+    },
+    bearerHeaders(teacher.accessToken),
+  );
   if (quizResponse.statusCode !== 201) {
     throw new Error(`quiz create failed: ${quizResponse.statusCode}`);
   }
   const quiz = quizResponse.body.quiz;
 
-  const live = await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+  const live = await request(
+    "POST",
+    `/sessions/${sessionId}/state`,
+    { state: "LIVE" },
+    bearerHeaders(teacher.accessToken),
+  );
   if (live.statusCode !== 200) throw new Error(`session start failed: ${live.statusCode}`);
 
   return {

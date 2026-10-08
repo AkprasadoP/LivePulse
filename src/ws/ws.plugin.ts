@@ -199,6 +199,20 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   }
 
   /**
+   * Release derived presence bookkeeping once the LAST local connection for
+   * a session is gone. Local presence truth is the registry; these maps are
+   * caches keyed by sessionId, and sessions are created continuously over the
+   * process lifetime, so leaving them behind would grow without bound. Called
+   * from every presence refresh, so it covers socket close, session.leave and
+   * session switch identically.
+   */
+  function releaseSessionBookkeepingIfEmpty(sessionId: string): void {
+    if (registry.countForSession(sessionId) > 0) return;
+    presenceTracker.forgetSession(sessionId);
+    lastPublishedLocal.delete(sessionId);
+  }
+
+  /**
    * Presence refresh after a lifecycle event: publish our local set (only if
    * it changed, unless forced by the digest), then push the recomputed
    * aggregate to local clients. Failure here must never break the lifecycle
@@ -209,6 +223,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     publishLocalPresence(sessionId, force);
     broadcastPresenceSnapshot(sessionId, except);
     syncGauges();
+    releaseSessionBookkeepingIfEmpty(sessionId);
   }
 
   /** Send one connection the current aggregated presence snapshot. */
@@ -276,7 +291,15 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
 
   // ---- HTTP Upgrade routing ----------------------------------------------
   const upgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const { pathname } = new URL(request.url ?? "/", "ws://localhost");
+    // Parse defensively: a malformed request target must never throw out of the
+    // HTTP 'upgrade' event (an uncaught throw there would crash the process).
+    let pathname: string;
+    try {
+      pathname = new URL(request.url ?? "/", "ws://localhost").pathname;
+    } catch {
+      socket.destroy();
+      return;
+    }
     if (pathname !== WS_PATH) {
       // Unknown upgrade target: refuse before any handshake bytes are sent.
       socket.destroy();
@@ -349,7 +372,8 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       metrics?.wsConnectionsClosed.inc({ reason: byHeartbeat ? "heartbeat" : "client" });
       if (sessionId !== null) {
         metrics?.sessionLeaves.inc({ reason: "disconnect" });
-        if (registry.countForSession(sessionId) === 0) presenceTracker.forgetSession(sessionId);
+        // refreshPresence releases per-session caches once the last local
+        // connection is gone, so nothing lingers for the process lifetime.
         refreshPresence(sessionId);
       } else {
         syncGauges();

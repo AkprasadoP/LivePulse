@@ -517,6 +517,31 @@ Rules:
 | Unknown server events      | Clients must ignore server `type`s they do not know (forward compatibility).                                                       |
 | No durable state           | The registry is process memory only. Connections are never stored in PostgreSQL; answers/participants are.                         |
 
+### Security model (Phase 11)
+
+- **Identity is verified, never declared.** The only identity input is the
+  `auth.authenticate` access token; `userId`/`participantId`/`role` are
+  rejected everywhere (`INVALID_REQUEST`). Authority (TEACHER, session
+  ownership) is resolved server-side from the token and PostgreSQL.
+- **View-only connections cannot act.** A connection that never authenticated
+  (or whose token failed) binds no participant and receives
+  `NOT_A_PARTICIPANT` for participant-bound events; teacher events
+  additionally require `TEACHER_REQUIRED` authority.
+- **Malformed input cannot crash or exhaust the process.** Every frame is
+  parsed defensively (bad JSON → `INVALID_MESSAGE`, never a throw), payloads
+  are strict Zod schemas with bounded string/array lengths, and the `ws`
+  `maxPayload` cap closes oversized frames with 1009 before they reach the
+  handlers.
+- **No connection is trusted to name a session it is not in.** Cross-session
+  ids are treated as unknown (`*_NOT_FOUND`), so a valid id from another
+  session leaks nothing about it.
+- **Accepted limitations**: no per-connection message rate limiting or flood
+  control (bounded frame size + sequential per-connection processing are the
+  only guards); a user may hold several simultaneous connections (one
+  participant row per `(sessionId, userId)`, many sockets); refresh-token
+  revocation does not proactively close live sockets (access tokens stay
+  valid to their 15-minute expiry). See `docs/api/authentication.md` §8.
+
 ## 10. Worked example (full live quiz)
 
 ```

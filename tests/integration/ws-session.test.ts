@@ -12,6 +12,7 @@ import {
   waitFor,
   TEST_DATABASE_URL,
   registerAndCreateSession,
+  bearerHeaders,
 } from "./helpers.js";
 import { loadConfig } from "../../src/config/index.js";
 import { buildApp } from "../../src/app/app.js";
@@ -38,26 +39,27 @@ describe("WebSocket session behavior (integration)", () => {
     await resetDatabase();
   });
 
-  async function createSession(name: string): Promise<string> {
+  async function createSession(name: string): Promise<{ sessionId: string; accessToken: string }> {
     // Phase 10.7: creation requires authentication. resetDatabase() wipes user
     // rows before every test, so each call registers a fresh owner (a token
     // minted in beforeAll would point at a truncated row).
-    const { sessionId } = await registerAndCreateSession(app, name);
-    return sessionId;
+    const { sessionId, accessToken } = await registerAndCreateSession(app, name);
+    return { sessionId, accessToken };
   }
 
-  async function startSession(sessionId: string): Promise<void> {
+  async function startSession(sessionId: string, accessToken: string): Promise<void> {
+    // Phase 11: the state transition is creator-only.
     const response = await app.inject({
       method: "POST",
       url: `/sessions/${sessionId}/state`,
       payload: JSON.stringify({ state: "LIVE" }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...bearerHeaders(accessToken) },
     });
     expect(response.statusCode).toBe(200);
   }
 
   it("joins an existing session and receives session.joined + authoritative session.state", async () => {
-    const sessionId = await createSession("Join me");
+    const { sessionId } = await createSession("Join me");
     const client = await connectWsClient();
 
     client.send({ type: "session.join", requestId: "join-1", payload: { sessionId } });
@@ -85,8 +87,8 @@ describe("WebSocket session behavior (integration)", () => {
   });
 
   it("reports the authoritative PostgreSQL state at join time (LIVE session)", async () => {
-    const sessionId = await createSession("Live session");
-    await startSession(sessionId);
+    const { sessionId, accessToken } = await createSession("Live session");
+    await startSession(sessionId, accessToken);
 
     const client = await connectWsClient();
     client.send({ type: "session.join", requestId: "j", payload: { sessionId } });
@@ -118,7 +120,7 @@ describe("WebSocket session behavior (integration)", () => {
   });
 
   it("refuses a duplicate join to the same session (SESSION_ALREADY_JOINED, no state change)", async () => {
-    const sessionId = await createSession("Once only");
+    const { sessionId } = await createSession("Once only");
     const client = await connectWsClient();
 
     client.send({ type: "session.join", requestId: "first", payload: { sessionId } });
@@ -134,8 +136,8 @@ describe("WebSocket session behavior (integration)", () => {
   });
 
   it("switches sessions deterministically: join(A) then join(B) leaves A and joins B", async () => {
-    const sessionA = await createSession("Session A");
-    const sessionB = await createSession("Session B");
+    const { sessionId: sessionA } = await createSession("Session A");
+    const { sessionId: sessionB } = await createSession("Session B");
     const client = await connectWsClient();
 
     client.send({ type: "session.join", requestId: "a", payload: { sessionId: sessionA } });
@@ -152,7 +154,7 @@ describe("WebSocket session behavior (integration)", () => {
   });
 
   it("session.leave detaches from the registry but keeps the socket open", async () => {
-    const sessionId = await createSession("Leave me");
+    const { sessionId } = await createSession("Leave me");
     const client = await connectWsClient();
 
     client.send({ type: "session.join", requestId: "j", payload: { sessionId } });
@@ -171,7 +173,7 @@ describe("WebSocket session behavior (integration)", () => {
   });
 
   it("many connections join and are counted independently (connection-keyed, no dedup)", async () => {
-    const sessionId = await createSession("Crowded");
+    const { sessionId } = await createSession("Crowded");
     const clients: WsTestClient[] = [];
     for (let i = 0; i < 5; i++) {
       const client = await connectWsClient();

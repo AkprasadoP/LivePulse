@@ -20,10 +20,11 @@
                     ▼
 Fastify server (TypeScript, ESM)
    ├── GET  /health                        → liveness only: { "status": "ok" }
-   ├── POST /sessions                      → session + auto-provisioned TEACHER creator
-   ├── GET  /sessions/:sessionId           → session + participants
-   ├── POST /sessions/:sessionId/state     → explicit lifecycle transitions
-   ├── POST /sessions/:sessionId/quizzes   → quiz + inline ordered questions
+   ├── POST /auth/register|login|refresh|logout, GET /me   → Phase 10 auth (docs/api/authentication.md)
+   ├── POST /sessions                      → session + TEACHER creator (authenticated token subject, Phase 10.7)
+   ├── GET  /sessions/:sessionId           → session + participants (open read)
+   ├── POST /sessions/:sessionId/state     → explicit lifecycle transitions (creator-only, Phase 11)
+   ├── POST /sessions/:sessionId/quizzes   → quiz + inline ordered questions (creator-only, Phase 11)
    ├── GET  /quizzes/:quizId               → quiz + questions (answers hidden)
    ├── GET  /ws (plain HTTP)               → 426 Upgrade Required
    ├── WebSocket upgrade /ws               → raw `ws`, upgrade-routed on the SAME HTTP server
@@ -44,7 +45,7 @@ Fastify server (TypeScript, ESM)
    │     receive path read-only: validate → schema-version gate → echo drop → local-interest filter → render frames
    │     at-most-once delivery; Redis failure degrades propagation, never commits (DISTRIBUTION_ENABLED switch)
    ├── Zod-validated env config (fail-fast) + Zod request validation
-   ├── Centralized error mapping (400/404/409/500, consistent body shape)
+   ├── Centralized error mapping (400/401/403/404/409/500, consistent body shape)
    ├── Pino structured logging (connection/protocol/heartbeat events)
    ├── Graceful shutdown: preClose closes WS (1001) BEFORE server.close()
    └── Modules (domain-specific repositories, no generic abstractions)

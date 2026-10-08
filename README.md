@@ -13,8 +13,9 @@ WS protocol: `docs/api/websocket-protocol.md` · Schema:
 
 ## Current implementation status
 
-**Phase 7 — Presence + Observability** (complete; Phases 1–6 retained beneath
-it):
+**Phases 1–11 complete** (foundation → real-time classroom → distributed
+WebSockets → recovery → presence/observability → production infra →
+authentication → Phase 11 security hardening):
 
 - Everything from Phases 1–2: typed Fastify HTTP server, fail-fast Zod
   config, Pino logging, graceful shutdown, liveness-only `/health`, the
@@ -42,7 +43,7 @@ it):
   simultaneous correct answers (the 100 race repeated 3×) and a mixed
   correct/incorrect run — exactly one winner on every run
   (`docs/testing/concurrency.md`)
-- Vitest suites: 72 unit tests + 141 integration tests against real
+- Vitest suites: 84 unit tests + 174 integration tests against real
   PostgreSQL, real Redis and real WebSocket clients
 - **Phase 4 — distributed WebSockets (implemented)**: inter-instance event
   distribution over Redis Pub/Sub, strictly as post-commit event notices on a
@@ -172,7 +173,13 @@ curl -s http://127.0.0.1:3100/health   # → {"status":"ok"}
 Full design, migration workflow, verification log and limits:
 `docs/architecture/production.md`. Still ahead: TLS and orchestration.
 Phase 10 (authentication + authorization) is implemented —
-`docs/api/authentication.md`.
+`docs/api/authentication.md`. Phase 11 (security & production hardening)
+closed the HTTP control-plane gap (mutating a session or its quizzes now
+requires the authenticated session creator), made refresh-token rotation
+atomic and single-use, bounded per-session presence bookkeeping, and pins
+WS input limits (64 KiB frames → close 1009). Rate limiting is deliberately
+not built — see the accepted-limitations list in
+`docs/api/authentication.md` §8.
 
 Phase 9.2 adds Nginx (`nginx/nginx.conf`, single upstream, no balancing)
 as the operator entrypoint on 127.0.0.1:3200; it proxies both HTTP and

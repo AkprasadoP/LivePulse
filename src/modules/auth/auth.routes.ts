@@ -120,13 +120,21 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       throw unauthorized("Invalid refresh token");
     }
     // Mint once: the raw token goes to the client, its hash to storage.
-    // rotate() atomically revokes the old session and links the replacement.
+    // rotate() atomically revokes the old session and links the replacement;
+    // it returns null when the presented token was not live at the moment of
+    // rotation (a concurrent double-submit of the same token). That is reuse
+    // exactly like the revoked-token branch above, so it takes the same
+    // logout-everywhere response instead of silently minting a second session.
     const replacement = tokens.mintRefreshToken();
-    await sessions.rotate(presented.id, {
+    const rotated = await sessions.rotate(presented.id, {
       userId: presented.userId,
       refreshTokenHash: replacement.tokenHash,
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
     });
+    if (rotated === null) {
+      await sessions.revokeChain(presented);
+      throw unauthorized("Invalid refresh token");
+    }
     const accessToken = await tokens.issueAccessToken(presented.userId);
     reply.code(200);
     return { accessToken, refreshToken: replacement.token, expiresIn: 900 };

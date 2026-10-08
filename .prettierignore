@@ -1,0 +1,12 @@
+# Generated artifacts are not hand-formatted code.
+#
+# pnpm emits its lockfile with single-quoted YAML scalars, while Prettier's
+# YAML printer always uses double quotes. The two can never agree, so the
+# lockfile is excluded rather than reformatted (~2,900 lines of churn on a
+# generated file, with no review value).
+pnpm-lock.yaml
+
+# Build output / dependencies (also gitignored, listed for clarity).
+dist/
+node_modules/
+coverage/

@@ -20,9 +20,25 @@ All responses are JSON. Errors use one consistent envelope:
 | Status | When                                                                          |
 | ------ | ----------------------------------------------------------------------------- |
 | 400    | request body/query fails Zod validation, malformed JSON, malformed UUID param |
+| 401    | missing, malformed, expired or tampered access token on a protected route     |
+| 403    | authenticated but not the resource owner (session creator)                    |
 | 404    | referenced resource does not exist                                            |
 | 409    | invalid state transition, or a uniqueness constraint would be violated        |
 | 500    | unexpected server error (details are logged, never leaked)                    |
+
+## Authorization boundaries (Phase 11)
+
+- **Reads are open**: `GET /sessions/:sessionId` and `GET /quizzes/:quizId`
+  are id-addressed views (a caller must already know the id) and stay
+  unauthenticated. They never expose `correctAnswer`, credentials, or tokens.
+- **Mutations require the session creator**: `POST /sessions/:sessionId/state`
+  and `POST /sessions/:sessionId/quizzes` require a valid access token **and**
+  ownership. A stranger's valid token is `403`, not a silent no-op; a missing
+  or invalid token is `401` (authentication runs first, so an unauthenticated
+  caller can never be silently downgraded to an anonymous mutation). This is
+  the same `creator == TEACHER` rule the WebSocket teacher path enforces.
+- The creator is **always** the access-token subject; a `creator`/`userId`
+  field in the body is ignored.
 
 ---
 
@@ -128,6 +144,9 @@ database access).
 
 ## POST /sessions/:sessionId/state
 
+**Requires authentication and session-creator ownership** (Phase 11):
+`Authorization: Bearer <access-token>` for the user that created the session.
+
 Explicit lifecycle transition. The approved state machine:
 
 ```
@@ -167,12 +186,16 @@ concurrent transitions are race-safe (exactly one wins).
 Side effects: entering `LIVE` sets `startedAt`; entering `ENDED` sets
 `endedAt` and preserves `startedAt`.
 
-**Errors:** 400 (unknown target state), 404 (unknown session), 409
+**Errors:** 400 (unknown target state), 401 (missing/invalid token), 403
+(valid token, not the session creator), 404 (unknown session), 409
 (invalid transition, e.g. `ENDED → LIVE`).
 
 ---
 
 ## POST /sessions/:sessionId/quizzes
+
+**Requires authentication and session-creator ownership** (Phase 11):
+`Authorization: Bearer <access-token>` for the user that created the session.
 
 Creates a quiz for an existing session, with optional inline questions
 (approved Phase 1 intake decision). Quiz and questions are written in one
@@ -230,8 +253,9 @@ teacher events since Phase 3 (`quiz.start`, `question.publish`,
 
 `correctAnswer` is **never** included in any response — teacher-only data.
 
-**Errors:** 400 (missing title, empty prompt, malformed id), 404 (session
-does not exist — nothing is created).
+**Errors:** 400 (missing title, empty prompt, malformed id), 401
+(missing/invalid token), 403 (valid token, not the session creator), 404
+(session does not exist — nothing is created).
 
 ---
 

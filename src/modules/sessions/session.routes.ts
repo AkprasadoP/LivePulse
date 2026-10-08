@@ -12,6 +12,7 @@ import { serializeQuiz } from "../quizzes/quiz.serializer.js";
 import { NotFoundError } from "../../shared/errors.js";
 import type { TokenService } from "../auth/token.service.js";
 import { createAuthenticatePreHandler } from "../auth/authenticate.js";
+import { createSessionOwnerPreHandler } from "./session-ownership.js";
 
 export interface SessionRoutesOptions {
   prisma: PrismaClient;
@@ -25,6 +26,8 @@ export async function sessionRoutes(
   const sessions = new SessionRepository(options.prisma);
   const quizzes = new QuizRepository(options.prisma);
   const authenticate = createAuthenticatePreHandler(options.tokens);
+  // Phase 11: mutating a session or its quizzes requires the session creator.
+  const requireOwner = createSessionOwnerPreHandler(options.prisma, options.tokens);
 
   app.post("/sessions", { preHandler: authenticate }, async (request, reply) => {
     const body = createSessionSchema.parse(request.body);
@@ -100,7 +103,8 @@ export async function sessionRoutes(
   });
 
   // Explicit, approved state machine: CREATED -> LIVE -> ENDED (+ CREATED -> ENDED).
-  app.post("/sessions/:sessionId/state", async (request) => {
+  // Phase 11: creator-only (was unauthenticated).
+  app.post("/sessions/:sessionId/state", { preHandler: requireOwner }, async (request) => {
     const { sessionId } = sessionIdParamsSchema.parse(request.params);
     const body = sessionStateTransitionSchema.parse(request.body);
     const session = await sessions.transitionState(sessionId, body.state);
@@ -117,7 +121,8 @@ export async function sessionRoutes(
     };
   });
 
-  app.post("/sessions/:sessionId/quizzes", async (request, reply) => {
+  // Phase 11: creator-only (was unauthenticated).
+  app.post("/sessions/:sessionId/quizzes", { preHandler: requireOwner }, async (request, reply) => {
     const { sessionId } = sessionIdParamsSchema.parse(request.params);
     const body = createQuizSchema.parse(request.body);
     const quiz = await quizzes.createForSession(sessionId, body);

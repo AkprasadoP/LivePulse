@@ -9,6 +9,7 @@ import {
   connectToInstance,
   joinAs,
   registerAndCreateSession,
+  bearerHeaders,
   waitFor,
   waitForAsync,
   waitForPresence,
@@ -48,13 +49,17 @@ function requestOn(instance: IndependentInstance) {
     method: "GET" | "POST",
     url: string,
     payload?: unknown,
+    headers?: Record<string, string>,
   ): Promise<{ statusCode: number; body: any }> => {
     const response = await instance.app.inject({
       method,
       url,
       ...(payload === undefined
         ? {}
-        : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+        : {
+            payload: JSON.stringify(payload),
+            headers: { "content-type": "application/json", ...(headers ?? {}) },
+          }),
     });
     let body: any = response.body;
     try {
@@ -70,11 +75,17 @@ function requestOn(instance: IndependentInstance) {
 async function createLiveSession(instance: IndependentInstance): Promise<string> {
   const request = requestOn(instance);
   // Phase 10.7: creation requires an authenticated owner (token subject).
-  const { sessionId } = await registerAndCreateSession(
+  // Phase 11: the state transition is creator-only, so use the owner's token.
+  const { sessionId, accessToken } = await registerAndCreateSession(
     instance.app,
     `Presence ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
   );
-  const live = await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+  const live = await request(
+    "POST",
+    `/sessions/${sessionId}/state`,
+    { state: "LIVE" },
+    bearerHeaders(accessToken),
+  );
   expect(live.statusCode).toBe(200);
   return sessionId;
 }

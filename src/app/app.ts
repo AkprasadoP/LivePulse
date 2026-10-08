@@ -12,7 +12,7 @@ import { TokenService } from "../modules/auth/token.service.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { sessionRoutes } from "../modules/sessions/session.routes.js";
 import { quizRoutes } from "../modules/quizzes/quiz.routes.js";
-import { NotFoundError, InvalidStateTransitionError } from "../shared/errors.js";
+import { NotFoundError, ForbiddenError, InvalidStateTransitionError } from "../shared/errors.js";
 import { attachWebSocketLayer, type WebSocketLayer } from "../ws/index.js";
 
 declare module "fastify" {
@@ -94,6 +94,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     }
     if (error instanceof NotFoundError) {
       return reply.code(404).send({ statusCode: 404, error: "Not Found", message: error.message });
+    }
+    if (error instanceof ForbiddenError) {
+      return reply.code(403).send({ statusCode: 403, error: "Forbidden", message: error.message });
     }
     if (error instanceof InvalidStateTransitionError) {
       return reply.code(409).send({

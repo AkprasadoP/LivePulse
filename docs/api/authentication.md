@@ -83,6 +83,13 @@ token is **rotated**: the old session is revoked and linked to the new one
 **revokes the whole user's session set** (`logout-everywhere`), then returns
 `401 { message: "Invalid refresh token" }`.
 
+Rotation is **atomic and single-use** (Phase 11): the revoke is a conditional
+update (`WHERE revokedAt IS NULL`). Two simultaneous refreshes presenting the
+same token therefore cannot both succeed — one rotation wins, the other
+matches no row and is treated as reuse (logout-everywhere). This closes the
+race where two live sessions could previously be minted from one token
+without surfacing the compromise.
+
 ### `POST /auth/logout` → 204
 
 ```json
@@ -152,3 +159,44 @@ Passwords are hashed with Argon2id (production: m=64 MiB, t=3, p=1). Passwords,
 password hashes, access tokens, refresh tokens, refresh-token hashes and
 `AUTH_ACCESS_SECRET` never appear in logs, error payloads, or responses — auth
 views expose only `{ id, email, displayName }`.
+
+The WebSocket `auth.authenticate` handler logs only a bounded reason enum
+(`invalid`/`expired`), never the token. HTTP access tokens travel in the
+`Authorization` header, which Fastify's default logger does not serialize.
+
+## 7. Authorization (Phase 11)
+
+Identity (Phase 10) is who you are; authorization is what you may do.
+
+- **HTTP control plane**: creating a session requires a token; mutating a
+  session or adding quizzes to it requires the **session creator's** token
+  (`403` for any other authenticated user, `401` when unauthenticated). See
+  `docs/api/http-api.md`.
+- **WebSocket**: only authenticated connections bind a participant;
+  `quiz.start` / `question.publish` / `question.close` / `doubt.resolve` /
+  `doubt.dismiss` additionally require `TEACHER` authority, which today means
+  the session creator. Authority is derived server-side from the token and the
+  database, never from any client-supplied field.
+- Student and view-only callers are refused with a bounded protocol error
+  (`TEACHER_REQUIRED`, `NOT_A_PARTICIPANT`).
+
+## 8. Accepted limitations (Phase 11)
+
+These are deliberate and documented, not defects:
+
+1. **No rate limiting / login throttling.** Login, registration, refresh and
+   WS event handling are not throttled. Brute-force resistance today comes
+   from Argon2id's cost (~130 ms/verify in production), generic failures, and
+   bounded payloads — not from a limiter. No distributed limiter is built
+   (it would add shared state the architecture avoids); a small in-process
+   guard remains a possible later addition, not a Phase 11 requirement.
+2. **Access-token revocation is bounded by the 15-minute lifetime** (§4).
+3. **Refresh revocation does not sever live WebSockets** (§4).
+4. **No email verification, password reset, MFA, OAuth/SSO, device
+   management, or account recovery.** Out of scope by design.
+5. **Registration reveals email/displayName taken** via `409` — standard and
+   unavoidable for a signup form.
+6. **No CSRF infrastructure.** Tokens are bearer tokens in the
+   `Authorization` header (never cookies), so there is no ambient-credential
+   CSRF vector to defend. No CORS middleware is enabled either; the server
+   does not opt into cross-origin browser access.

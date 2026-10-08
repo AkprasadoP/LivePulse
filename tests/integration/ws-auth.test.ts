@@ -335,11 +335,12 @@ describe("WS authentication (Phase 10.5)", () => {
         client.send({ type: "auth.authenticate", requestId: "t-auth", payload: { token } });
         await client.waitFor((m) => m.type === "auth.authenticated");
         // Sessions start CREATED; quiz.start requires LIVE (state machine).
+        // Phase 11: the state transition is creator-only (creator token).
         const live = await instance.app.inject({
           method: "POST",
           url: `/sessions/${sessionId}/state`,
           payload: JSON.stringify({ state: "LIVE" }),
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         });
         expect(live.statusCode).toBe(200);
         client.send({ type: "session.join", requestId: "t-join", payload: { sessionId } });
@@ -352,7 +353,7 @@ describe("WS authentication (Phase 10.5)", () => {
           method: "POST",
           url: `/sessions/${sessionId}/quizzes`,
           payload: JSON.stringify({ title: "Q" }),
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         });
         expect(quiz.statusCode).toBe(201);
         const quizId = (quiz.json() as any).quiz.id as string;
@@ -376,12 +377,16 @@ describe("WS authentication (Phase 10.5)", () => {
     const instance = await startIndependentInstance(`ws-authz-${stamp()}`);
     try {
       // Session A with a real quiz, owned by its registered creator.
-      const { sessionId: sessionA } = await makeSession(instance, `OwnerA-${stamp()}`);
+      const { sessionId: sessionA, accessToken: ownerAToken } = await makeSession(
+        instance,
+        `OwnerA-${stamp()}`,
+      );
+      // Phase 11: quiz creation is creator-only, so use the session owner's token.
       const quizA = await instance.app.inject({
         method: "POST",
         url: `/sessions/${sessionA}/quizzes`,
         payload: JSON.stringify({ title: "Q" }),
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", authorization: `Bearer ${ownerAToken}` },
       });
       const quizId = (quizA.json() as any).quiz.id as string;
 

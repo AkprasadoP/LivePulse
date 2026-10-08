@@ -12,6 +12,14 @@ export class NotFoundError extends Error {
   }
 }
 
+export class ForbiddenError extends Error {
+  public readonly statusCode = 403;
+  public constructor(message = "Forbidden") {
+    super(message);
+    this.name = "ForbiddenError";
+  }
+}
+
 export class InvalidStateTransitionError extends Error {
   public constructor(
     public readonly entity: string,

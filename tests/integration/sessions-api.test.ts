@@ -157,18 +157,20 @@ describe("Sessions API (integration)", () => {
   });
 
   describe("POST /sessions/:sessionId/state", () => {
+    // Phase 11: mutating a session is creator-only, so every transition call
+    // carries the creator's bearer token (the same headers used to create it).
     it("performs the full approved lifecycle CREATED -> LIVE -> ENDED", async () => {
       const headers = await authHeaders();
       const created = await ctx.request("POST", "/sessions", { name: "Lifecycle" }, headers);
       const id = created.body.session.id;
 
-      const live = await ctx.request("POST", `/sessions/${id}/state`, { state: "LIVE" });
+      const live = await ctx.request("POST", `/sessions/${id}/state`, { state: "LIVE" }, headers);
       expect(live.statusCode).toBe(200);
       expect(live.body.session.state).toBe("LIVE");
       expect(live.body.session.startedAt).not.toBeNull();
       expect(live.body.session.endedAt).toBeNull();
 
-      const ended = await ctx.request("POST", `/sessions/${id}/state`, { state: "ENDED" });
+      const ended = await ctx.request("POST", `/sessions/${id}/state`, { state: "ENDED" }, headers);
       expect(ended.statusCode).toBe(200);
       expect(ended.body.session.state).toBe("ENDED");
       expect(ended.body.session.endedAt).not.toBeNull();
@@ -183,6 +185,7 @@ describe("Sessions API (integration)", () => {
         {
           state: "ENDED",
         },
+        headers,
       );
       expect(statusCode).toBe(200);
       expect(body.session.state).toBe("ENDED");
@@ -194,12 +197,17 @@ describe("Sessions API (integration)", () => {
       const headers = await authHeaders();
       const created = await ctx.request("POST", "/sessions", { name: "Terminal" }, headers);
       const id = created.body.session.id;
-      await ctx.request("POST", `/sessions/${id}/state`, { state: "LIVE" });
-      await ctx.request("POST", `/sessions/${id}/state`, { state: "ENDED" });
+      await ctx.request("POST", `/sessions/${id}/state`, { state: "LIVE" }, headers);
+      await ctx.request("POST", `/sessions/${id}/state`, { state: "ENDED" }, headers);
 
-      const { statusCode, body } = await ctx.request("POST", `/sessions/${id}/state`, {
-        state: "LIVE",
-      });
+      const { statusCode, body } = await ctx.request(
+        "POST",
+        `/sessions/${id}/state`,
+        {
+          state: "LIVE",
+        },
+        headers,
+      );
       expect(statusCode).toBe(409);
       expect(body.error).toBe("Conflict");
       expect(body.message).toContain("ENDED -> LIVE");
@@ -214,15 +222,22 @@ describe("Sessions API (integration)", () => {
         {
           state: "CREATED",
         },
+        headers,
       );
       expect(statusCode).toBe(400); // schema-level rejection: CREATED is not a valid target
     });
 
     it("rejects unknown session id with 404", async () => {
+      const headers = await authHeaders();
       const unknownId = "01900000-0000-7000-8000-000000000001";
-      const { statusCode, body } = await ctx.request("POST", `/sessions/${unknownId}/state`, {
-        state: "LIVE",
-      });
+      const { statusCode, body } = await ctx.request(
+        "POST",
+        `/sessions/${unknownId}/state`,
+        {
+          state: "LIVE",
+        },
+        headers,
+      );
       expect(statusCode).toBe(404);
       expect(body.error).toBe("Not Found");
     });
@@ -234,27 +249,44 @@ describe("Sessions API (integration)", () => {
       const session = await ctx.request("POST", "/sessions", { name: "Quiz host" }, headers);
       const sessionId = session.body.session.id;
 
-      await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {
-        title: "Quiz A",
-        questions: [{ prompt: "2+2?", correctAnswer: "4" }],
-      });
+      // Phase 11: quiz creation is creator-only.
+      await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {
+          title: "Quiz A",
+          questions: [{ prompt: "2+2?", correctAnswer: "4" }],
+        },
+        headers,
+      );
 
       const detail = await ctx.request("GET", `/sessions/${sessionId}`);
       expect(detail.statusCode).toBe(200);
       expect(detail.body.participants).toHaveLength(1);
 
-      const quizResponse = await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {
-        title: "Quiz B",
-      });
+      const quizResponse = await ctx.request(
+        "POST",
+        `/sessions/${sessionId}/quizzes`,
+        {
+          title: "Quiz B",
+        },
+        headers,
+      );
       expect(quizResponse.statusCode).toBe(201);
       expect(quizResponse.body.quiz.sessionId).toBe(sessionId);
     });
 
     it("rejects quiz creation for a nonexistent session with 404", async () => {
+      const headers = await authHeaders();
       const unknownId = "01900000-0000-7000-8000-000000000002";
-      const { statusCode, body } = await ctx.request("POST", `/sessions/${unknownId}/quizzes`, {
-        title: "Orphan quiz",
-      });
+      const { statusCode, body } = await ctx.request(
+        "POST",
+        `/sessions/${unknownId}/quizzes`,
+        {
+          title: "Orphan quiz",
+        },
+        headers,
+      );
       expect(statusCode).toBe(404);
       expect(body.error).toBe("Not Found");
     });

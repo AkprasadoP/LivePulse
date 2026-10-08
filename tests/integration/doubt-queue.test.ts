@@ -7,6 +7,7 @@ import {
   connectToInstance,
   joinAs,
   registerAndCreateSession,
+  bearerHeaders,
   waitForAsync,
   type IndependentInstance,
 } from "./helpers.js";
@@ -26,13 +27,21 @@ async function makeLiveSession(instance: IndependentInstance): Promise<{
   sessionId: string;
   teacherName: string;
 }> {
-  const request = async (method: "GET" | "POST", url: string, payload?: unknown) => {
+  const request = async (
+    method: "GET" | "POST",
+    url: string,
+    payload?: unknown,
+    headers?: Record<string, string>,
+  ) => {
     const response = await instance.app.inject({
       method,
       url,
       ...(payload === undefined
         ? {}
-        : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+        : {
+            payload: JSON.stringify(payload),
+            headers: { "content-type": "application/json", ...(headers ?? {}) },
+          }),
     });
     let body: any = response.body;
     try {
@@ -45,11 +54,21 @@ async function makeLiveSession(instance: IndependentInstance): Promise<{
 
   // Phase 10.7: creation requires an authenticated owner; the registered
   // creator identity (teacherName) is reused by joinAs at the call sites.
-  const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
+  // Phase 11: the state transition is creator-only, so send the owner token.
+  const {
+    sessionId,
+    creatorDisplayName: teacherName,
+    accessToken,
+  } = await registerAndCreateSession(
     instance.app,
     `Doubt ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
   );
-  const live = await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
+  const live = await request(
+    "POST",
+    `/sessions/${sessionId}/state`,
+    { state: "LIVE" },
+    bearerHeaders(accessToken),
+  );
   expect(live.statusCode).toBe(200);
   return { sessionId, teacherName };
 }

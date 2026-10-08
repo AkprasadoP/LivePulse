@@ -211,6 +211,43 @@ describe("HTTP authentication (Phase 10.4)", () => {
     }
   });
 
+  it("concurrent refresh of the same token: exactly one succeeds and the reuse revokes the chain", async () => {
+    await start();
+    try {
+      const email = `race-${stamp()}@example.com`;
+      const reg = await post("/auth/register", {
+        email,
+        password: "race-pw-12345",
+        displayName: `Race-${stamp()}`,
+      });
+      expect(reg.statusCode).toBe(201);
+      madeUsers.push(reg.body.user.id);
+
+      // Two simultaneous refreshes with the SAME token. Rotation is a
+      // conditional UPDATE, so only one can win; the other is reuse and must
+      // revoke the whole user session set (logout-everywhere) rather than
+      // silently mint a second live session.
+      const [a, b] = await Promise.all([
+        post("/auth/refresh", { refreshToken: reg.body.refreshToken }),
+        post("/auth/refresh", { refreshToken: reg.body.refreshToken }),
+      ]);
+      expect([a.statusCode, b.statusCode].sort()).toEqual([200, 401]);
+
+      const winner = a.statusCode === 200 ? a : b;
+      // The loser's reuse revokes everything, including the winner's brand-new
+      // refresh token — the chain response is not bypassable by winning.
+      expect(
+        (await post("/auth/refresh", { refreshToken: winner.body.refreshToken })).statusCode,
+      ).toBe(401);
+      const live = await prisma.authSession.count({
+        where: { userId: reg.body.user.id, revokedAt: null },
+      });
+      expect(live).toBe(0);
+    } finally {
+      await stop();
+    }
+  });
+
   it("/me rejects missing, malformed, and tampered tokens", async () => {
     await start();
     try {

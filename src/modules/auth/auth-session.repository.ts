@@ -53,26 +53,41 @@ export class AuthSessionRepository {
     });
   }
 
+  /**
+   * Atomically revoke `oldId` and create its replacement, or return `null`
+   * when `oldId` was not live (already rotated/revoked).
+   *
+   * The revoke is a CONDITIONAL update (`WHERE revokedAt IS NULL`, the same
+   * check-and-set discipline as the session/quiz state machines): under
+   * PostgreSQL ReadCommitted a concurrent rotate blocks on the row lock and,
+   * once the winner commits, its WHERE no longer matches — `count === 0`.
+   * That makes rotation single-use even under a concurrent double-submit of
+   * the same refresh token, which the caller treats as reuse. An
+   * unconditional UPDATE (the earlier shape) would let both racers "rotate"
+   * and silently mint two live sessions instead of surfacing the reuse.
+   */
   public async rotate(
     oldId: string,
     replacement: CreateAuthSessionInput,
     now: Date = new Date(),
-  ): Promise<{ oldSession: AuthSession; newSession: AuthSession }> {
-    const [oldSession, newSession] = await this.prisma.$transaction([
-      this.prisma.authSession.update({
-        where: { id: oldId },
+  ): Promise<{ oldSession: AuthSession; newSession: AuthSession } | null> {
+    return this.prisma.$transaction(async (tx) => {
+      const revoked = await tx.authSession.updateMany({
+        where: { id: oldId, revokedAt: null },
         data: { revokedAt: now },
-      }),
-      this.prisma.authSession.create({
+      });
+      if (revoked.count !== 1) return null;
+      const oldSession = await tx.authSession.findUniqueOrThrow({ where: { id: oldId } });
+      const newSession = await tx.authSession.create({
         data: {
           userId: replacement.userId,
           refreshTokenHash: replacement.refreshTokenHash,
           expiresAt: replacement.expiresAt,
           rotatedFromId: oldId,
         },
-      }),
-    ]);
-    return { oldSession, newSession };
+      });
+      return { oldSession, newSession };
+    });
   }
 
   /**

@@ -9,6 +9,7 @@ import {
   joinAs,
   createLiveQuizScenario,
   registerAndCreateSession,
+  bearerHeaders,
   WsTestClient,
 } from "./helpers.js";
 
@@ -369,15 +370,17 @@ describe("Live quiz flow (integration)", () => {
   it("rejects teacher operations before the session is LIVE", async () => {
     // createLiveQuizScenario moves the session to LIVE; roll it back is not
     // possible (state machine), so create a fresh CREATED session instead.
-    const { sessionId, creatorDisplayName: teacherDisplayName } = await registerAndCreateSession(
-      app,
-      "Not live yet",
-    );
+    const {
+      sessionId,
+      creatorDisplayName: teacherDisplayName,
+      accessToken,
+    } = await registerAndCreateSession(app, "Not live yet");
+    // Phase 11: quiz creation is creator-only, so use the owner's token.
     const quizResponse = await app.inject({
       method: "POST",
       url: `/sessions/${sessionId}/quizzes`,
       payload: JSON.stringify({ title: "Q", questions: [{ prompt: "p", correctAnswer: "x" }] }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...bearerHeaders(accessToken) },
     });
     const quiz = (quizResponse.json() as { quiz: { id: string } }).quiz;
 

@@ -100,14 +100,42 @@ describe("auth repositories (Phase 10.3)", () => {
       refreshTokenHash: hashRefreshToken("old-raw"),
       expiresAt: new Date(Date.now() + 1000),
     });
-    const { oldSession, newSession } = await sessions.rotate(old.id, {
+    const rotated = await sessions.rotate(old.id, {
       userId,
       refreshTokenHash: hashRefreshToken("new-raw"),
       expiresAt: new Date(Date.now() + 1000),
     });
+    expect(rotated).not.toBeNull();
+    const { oldSession, newSession } = rotated!;
     expect(oldSession.revokedAt).not.toBeNull();
     expect(newSession.rotatedFromId).toBe(old.id);
     expect(newSession.revokedAt).toBeNull();
+  });
+
+  it("rotate is single-use: a second rotate of the same session returns null (no second live session)", async () => {
+    const userId = await makeUser(`auth-r2-${Date.now()}`);
+    const old = await sessions.create({
+      userId,
+      refreshTokenHash: hashRefreshToken("race-old"),
+      expiresAt: new Date(Date.now() + 1000),
+    });
+    const first = await sessions.rotate(old.id, {
+      userId,
+      refreshTokenHash: hashRefreshToken("race-new-1"),
+      expiresAt: new Date(Date.now() + 1000),
+    });
+    expect(first).not.toBeNull();
+    // The conditional UPDATE no longer matches (revokedAt is set): the second
+    // caller gets null rather than a second live replacement.
+    const second = await sessions.rotate(old.id, {
+      userId,
+      refreshTokenHash: hashRefreshToken("race-new-2"),
+      expiresAt: new Date(Date.now() + 1000),
+    });
+    expect(second).toBeNull();
+    expect(await sessions.findByTokenHash(hashRefreshToken("race-new-2"))).toBeNull();
+    const live = await prisma.authSession.count({ where: { userId, revokedAt: null } });
+    expect(live).toBe(1);
   });
 
   it("revokeChain invalidates the whole user session set (reuse response)", async () => {
@@ -119,11 +147,11 @@ describe("auth repositories (Phase 10.3)", () => {
         expiresAt: new Date(Date.now() + 1000),
       });
     const s1 = await mk("chain-1");
-    const { newSession: s2 } = await sessions.rotate(s1.id, {
+    const s2 = (await sessions.rotate(s1.id, {
       userId,
       refreshTokenHash: hashRefreshToken("chain-2"),
       expiresAt: new Date(Date.now() + 1000),
-    });
+    }))!.newSession;
     const s3 = await mk("chain-3"); // unrelated second device
     // Reuse: chain-1's token presented after rotation.
     const presented = await sessions.findByTokenHash(hashRefreshToken("chain-1"));
