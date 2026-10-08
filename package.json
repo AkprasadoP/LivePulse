@@ -31,8 +31,10 @@
   "dependencies": {
     "@fastify/sensible": "^6.0.3",
     "@prisma/client": "^6.19.0",
+    "argon2": "^0.45.1",
     "fastify": "^5.6.1",
     "fastify-plugin": "^5.1.0",
+    "jose": "^6.2.12",
     "pino": "^9.13.0",
     "pino-pretty": "^13.1.2",
     "prom-client": "^15.1.3",
