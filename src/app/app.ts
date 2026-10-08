@@ -7,6 +7,8 @@ import { prismaPlugin } from "../infrastructure/prisma/index.js";
 import { createMetrics, type Metrics } from "../infrastructure/metrics/index.js";
 import { healthRoutes } from "./routes/health.js";
 import { readyRoutes } from "./routes/ready.js";
+import { authRoutes } from "../modules/auth/auth.routes.js";
+import { TokenService } from "../modules/auth/token.service.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { sessionRoutes } from "../modules/sessions/session.routes.js";
 import { quizRoutes } from "../modules/quizzes/quiz.routes.js";
@@ -150,6 +152,10 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   await app.register(metricsRoutes, { metrics: app.metrics });
   await app.register(sessionRoutes, { prisma: app.prisma });
   await app.register(quizRoutes, { prisma: app.prisma });
+  await app.register(authRoutes, {
+    prisma: app.prisma,
+    tokens: new TokenService(config.AUTH_ACCESS_SECRET),
+  });
 
   app.get("/", async () => {
     return { name: "livepulse", status: "ok" };

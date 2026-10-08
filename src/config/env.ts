@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { randomBytes } from "node:crypto";
 
 /**
  * Typed application configuration, parsed from environment variables.
@@ -65,6 +66,16 @@ export const envSchema = z.object({
    */
   PRESENCE_DIGEST_INTERVAL_MS: z.coerce.number().int().min(50).max(600_000).default(10_000),
   /**
+   * Phase 10 access-token signing secret (HS256, minimum 32 bytes).
+   * Production MUST set this explicitly — no ephemeral default, fail fast.
+   * Development/test get a random per-boot secret (tokens invalidate on
+   * restart, which is fine outside production).
+   */
+  AUTH_ACCESS_SECRET: z
+    .string()
+    .min(32, "AUTH_ACCESS_SECRET must be at least 32 characters")
+    .optional(),
+  /**
    * Phase 9.6 graceful draining: after SIGTERM, the instance stops accepting
    * NEW WebSocket connections and reports unready (/ready 503) while existing
    * connections finish for up to this long before teardown. Must fit inside
@@ -82,7 +93,9 @@ export const envSchema = z.object({
     .transform((value) => value === "true"),
 });
 
-export type AppConfig = z.infer<typeof envSchema>;
+export type AppConfig = Omit<z.infer<typeof envSchema>, "AUTH_ACCESS_SECRET"> & {
+  AUTH_ACCESS_SECRET: string;
+};
 
 export class ConfigValidationError extends Error {
   public readonly issues: string[];
@@ -107,5 +120,12 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   if (!result.success) {
     throw new ConfigValidationError(formatIssues(result.error));
   }
-  return result.data;
+  const provided = result.data.AUTH_ACCESS_SECRET;
+  if (provided !== undefined) return { ...result.data, AUTH_ACCESS_SECRET: provided };
+  if (result.data.NODE_ENV === "production") {
+    throw new ConfigValidationError([
+      "AUTH_ACCESS_SECRET: explicit secret required in production (no ephemeral default)",
+    ]);
+  }
+  return { ...result.data, AUTH_ACCESS_SECRET: randomBytes(32).toString("base64url") };
 }
