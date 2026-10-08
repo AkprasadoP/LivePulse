@@ -17,6 +17,7 @@ import {
   isKnownClientEvent,
   protocolIssueDetails,
   requiresParticipant,
+  authAuthenticatedMessage,
   type ErrorPayload,
   type ServerEnvelope,
 } from "./protocol.js";
@@ -33,6 +34,7 @@ import {
   handleDoubtQueueList,
 } from "./doubt-handlers.js";
 import type { Distributor } from "./distribution.js";
+import type { TokenService } from "../modules/auth/token.service.js";
 
 /**
  * Per-instance handler context: the scoped logger plus Phase 7 metric handles.
@@ -66,6 +68,11 @@ export interface HandlerDependencies {
   distributor?: Distributor;
   /** Phase 7: ephemeral presence (derived from the registry; never durability). */
   presenceTracker: PresenceTracker;
+  /**
+   * Phase 10.5: access-token verification for `auth.authenticate`. Constructed
+   * once per layer from config (same secret as HTTP auth, no new plumbing).
+   */
+  tokens: TokenService;
   /** Publish local presence + broadcast a snapshot to the session if it changed. */
   refreshPresence: (sessionId: string, except?: Connection) => void;
   /** Push the current aggregated presence snapshot to one connection. */
@@ -244,6 +251,7 @@ export async function handleClientEnvelope(
     // validated its own payload, so the per-case cast is safe.
     const payload = payloadResult.data as
       | { sessionId: string; participant?: { displayName: string } }
+      | { token: string }
       | { quizId: string }
       | { questionId: string }
       | { questionId: string; content: string }
@@ -251,6 +259,9 @@ export async function handleClientEnvelope(
       | { doubtId: string }
       | Record<string, never>;
     switch (type) {
+      case "auth.authenticate":
+        await handleAuthAuthenticate(connection, payload as { token: string }, requestId, deps);
+        return;
       case "session.join":
         await handleSessionJoin(
           connection,
@@ -354,8 +365,52 @@ export function handleError(
 }
 
 // ---------------------------------------------------------------------------
-// session.join / session.leave
+// auth.authenticate / session.join / session.leave
 // ---------------------------------------------------------------------------
+
+/**
+ * Phase 10.5: bind the connection to an authenticated user by verifying an
+ * access token server-side. Sets ONLY `connection.userId` — participant
+ * binding still happens at `session.join`. A failed attempt never clears a
+ * previously bound user (failed login is not logout) and never throws past
+ * this function: the client gets `UNAUTHENTICATED` and stays connected but
+ * unauthenticated.
+ */
+async function handleAuthAuthenticate(
+  connection: Connection,
+  payload: { token: string },
+  requestId: string,
+  deps: HandlerDependencies,
+): Promise<void> {
+  const verified = await deps.tokens.verifyAccessToken(payload.token);
+  if (!verified.ok) {
+    deps.log.warn({ reason: verified.reason }, "WebSocket protocol error: invalid access token");
+    sendProtocolError(
+      connection,
+      requestId,
+      { code: "UNAUTHENTICATED", message: "Invalid or expired access token", details: null },
+      deps.log,
+    );
+    return;
+  }
+  // The token subject must still resolve to a user row (deleted users keep
+  // no dangling authentication — fail closed rather than P2003 later).
+  const user = await deps.prisma.user.findUnique({
+    where: { id: verified.userId },
+    select: { id: true },
+  });
+  if (user === null) {
+    sendProtocolError(
+      connection,
+      requestId,
+      { code: "UNAUTHENTICATED", message: "Invalid or expired access token", details: null },
+      deps.log,
+    );
+    return;
+  }
+  connection.userId = user.id;
+  send(connection, authAuthenticatedMessage(requestId, { userId: user.id }), deps.log);
+}
 
 async function handleSessionJoin(
   connection: Connection,
@@ -388,10 +443,29 @@ async function handleSessionJoin(
     return;
   }
 
-  // Identity seam (Phase 3): bind (or rebind) the participant atomically.
-  // A join without `participant` stays view-only (Phase 2 compatibility).
+  // Identity resolution (Phase 10.5 precedence): an AUTHENTICATED connection
+  // is bound purely server-side — participant by (sessionId, userId), role
+  // and displayName from the database rows. Any client-supplied identity
+  // (known-field displayName or unknown userId/participantId/role, the latter
+  // already rejected by the strict schema) is ignored, never authoritative.
+  // Unauthenticated connections keep the legacy displayName path unchanged.
   let participant: { id: string; role: "TEACHER" | "STUDENT"; displayName: string } | null = null;
-  if (payload.participant) {
+  if (connection.userId !== null) {
+    deps.registry.leaveSession(connection);
+    const found = await deps.participantRepository.findOrCreateByUserId(
+      payload.sessionId,
+      connection.userId,
+    );
+    const user = await deps.prisma.user.findUniqueOrThrow({ where: { id: connection.userId } });
+    connection.participantId = found.participant.id;
+    connection.participantRole = found.participant.role;
+    connection.displayName = user.displayName;
+    participant = {
+      id: found.participant.id,
+      role: found.participant.role,
+      displayName: user.displayName,
+    };
+  } else if (payload.participant) {
     deps.registry.leaveSession(connection);
     const found = await deps.participantRepository.findOrCreate(
       payload.sessionId,

@@ -54,6 +54,17 @@ export const sessionJoinSchema = z.strictObject({
 
 export const sessionLeaveSchema = z.strictObject({});
 
+/**
+ * Phase 10.5: bind the connection to an authenticated user. The token
+ * travels in a WS frame (never in the upgrade URL — Nginx access logs
+ * record upgrade lines, never frame bodies). Deliberately minimal: the
+ * ONLY accepted identity claim is an access token. userId / participantId /
+ * role are not accepted anywhere — strictObject rejects them outright.
+ */
+export const authAuthenticateSchema = z.strictObject({
+  token: z.string().min(1).max(2048),
+});
+
 export const quizStartSchema = z.strictObject({
   quizId: z.uuid(),
 });
@@ -90,6 +101,7 @@ export const doubtQueueListSchema = z.strictObject({});
 
 /** Client event name -> its payload schema. The dispatch table for handlers. */
 export const clientEventSchemas = {
+  "auth.authenticate": authAuthenticateSchema,
   "session.join": sessionJoinSchema,
   "session.leave": sessionLeaveSchema,
   "quiz.start": quizStartSchema,
@@ -356,6 +368,7 @@ export const errorPayloadSchema = z.object({
     "INVALID_MESSAGE",
     "INVALID_REQUEST",
     "INVALID_SESSION_ID",
+    "UNAUTHENTICATED",
     "SESSION_NOT_FOUND",
     "SESSION_ALREADY_JOINED",
     "UNSUPPORTED_EVENT",
@@ -391,6 +404,18 @@ export function sessionJoinedMessage(
   payload: z.infer<typeof sessionJoinedPayloadSchema>,
 ): ServerEnvelope {
   return { type: "session.joined", requestId, payload };
+}
+
+export const authAuthenticatedPayloadSchema = z.object({
+  userId: z.uuid(),
+});
+
+/** Server confirmation of `auth.authenticate`: the bound authenticated user. */
+export function authAuthenticatedMessage(
+  requestId: string,
+  payload: z.infer<typeof authAuthenticatedPayloadSchema>,
+): ServerEnvelope {
+  return { type: "auth.authenticated", requestId, payload };
 }
 
 export function sessionStateMessage(

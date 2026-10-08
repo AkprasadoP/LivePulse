@@ -23,6 +23,14 @@ export interface Connection {
    */
   participantId: string | null;
   participantRole: "TEACHER" | "STUDENT" | null;
+  /**
+   * Phase 10.5: authenticated user bound by `auth.authenticate` (access
+   * token verified server-side). Connection-scoped, NOT session-scoped:
+   * survives session.leave; cleared only when the socket closes. Null until
+   * the client authenticates — unauthenticated connections keep the legacy
+   * displayName join path. Never set from client-supplied IDs.
+   */
+  userId: string | null;
   displayName: string | null;
   /**
    * Heartbeat liveness flag. Server sets true on every interval tick and
@@ -40,6 +48,7 @@ export function createConnection(socket: WebSocket): Connection {
     joinedSessionId: null,
     participantId: null,
     participantRole: null,
+    userId: null,
     displayName: null,
     isAlive: true,
     connectedAt: new Date(),

@@ -10,6 +10,7 @@ import { AnswerRepository } from "../modules/answers/answer.repository.js";
 import { UserRepository } from "../modules/users/user.repository.js";
 import { ParticipantRepository } from "../modules/participants/participant.repository.js";
 import { DoubtRepository } from "../modules/doubts/doubt.repository.js";
+import { TokenService } from "../modules/auth/token.service.js";
 import { handleClientEnvelope } from "./handlers.js";
 import { createDistributor, type Distributor } from "./distribution.js";
 import { PresenceTracker } from "./presence.js";
@@ -103,6 +104,8 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   const { config, httpServer, app } = options;
   const metrics = app.metrics ?? undefined;
   const registry = new SessionRegistry();
+  // Phase 10.5: one token service per layer (same secret as HTTP auth).
+  const tokens = new TokenService(config.AUTH_ACCESS_SECRET);
   // Phase 9.6 drain flag: checked synchronously per upgrade attempt.
   let draining = false;
   const sessionRepository = new SessionRepository(app.prisma);
@@ -531,6 +534,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       presenceTracker,
       refreshPresence,
       sendPresenceSnapshot,
+      tokens,
     });
   }
 
