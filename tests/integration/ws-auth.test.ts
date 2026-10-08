@@ -349,4 +349,66 @@ describe("WS authentication (Phase 10.5)", () => {
       await clean();
     }
   });
+
+  it("ownership (Phase 10.6): authenticated non-owner is denied teacher actions", async () => {
+    await clean();
+    const instance = await startIndependentInstance(`ws-authz-${stamp()}`);
+    try {
+      // Session A with a real quiz, owned by its auto-provisioned creator.
+      const sessA = await instance.app.inject({
+        method: "POST",
+        url: "/sessions",
+        payload: JSON.stringify({
+          name: `AuthzA ${stamp()}`,
+          creator: { displayName: `OwnerA-${stamp()}` },
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const sessionA = (sessA.json() as any).session.id as string;
+      const quizA = await instance.app.inject({
+        method: "POST",
+        url: `/sessions/${sessionA}/quizzes`,
+        payload: JSON.stringify({ title: "Q" }),
+        headers: { "content-type": "application/json" },
+      });
+      const quizId = (quizA.json() as any).quiz.id as string;
+
+      // Stranger authenticates and joins A: STUDENT, not owner.
+      const stranger = await register(
+        instance,
+        `stranger-${stamp()}@example.com`,
+        `Stranger-${stamp()}`,
+      );
+      const client = new WsTestClient();
+      try {
+        await client.connect(instance.port);
+        client.send({
+          type: "auth.authenticate",
+          requestId: "o-auth",
+          payload: { token: stranger.accessToken },
+        });
+        await client.waitFor((m) => m.type === "auth.authenticated");
+        client.send({
+          type: "session.join",
+          requestId: "o-join",
+          payload: { sessionId: sessionA },
+        });
+        const joined = await client.waitFor(
+          (m) => m.type === "session.joined" && (m as any).requestId === "o-join",
+        );
+        expect((joined.payload as any).role).toBe("STUDENT");
+        // Ownership denial (not merely role): valid quiz, wrong owner.
+        client.send({ type: "quiz.start", requestId: "o-evil", payload: { quizId } });
+        const denied = await client.waitFor(
+          (m) => m.type === "error" && (m as any).requestId === "o-evil",
+        );
+        expect((denied.payload as any).code).toBe("TEACHER_REQUIRED");
+      } finally {
+        await client.close();
+      }
+    } finally {
+      await instance.close();
+      await clean();
+    }
+  });
 });

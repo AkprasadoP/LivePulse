@@ -221,6 +221,12 @@ export async function handleClientEnvelope(
     }
   }
   // ...and teacher events additionally need the TEACHER role.
+  // Phase 10.6 ownership: for AUTHENTICATED connections, authority derives
+  // from userId → session creator, never from displayName. The bound
+  // participant's user must own the joined session. Unauthenticated
+  // connections keep the legacy role check (removed in 10.7). Today both
+  // formulations coincide (only creators hold TEACHER), so this is
+  // structural now and load-bearing once legacy binding is gone.
   const teacherEvents = [
     "quiz.start",
     "question.publish",
@@ -228,22 +234,26 @@ export async function handleClientEnvelope(
     "doubt.resolve",
     "doubt.dismiss",
   ] as const;
-  if (
-    (teacherEvents as readonly string[]).includes(type) &&
-    connection.participantRole !== "TEACHER"
-  ) {
-    deps.log.warn({ eventType: type }, "WebSocket protocol error: teacher required");
-    sendProtocolError(
-      connection,
-      requestId,
-      {
-        code: "TEACHER_REQUIRED",
-        message: "This event requires a TEACHER participant",
-        details: null,
-      },
-      deps.log,
-    );
-    return;
+  if ((teacherEvents as readonly string[]).includes(type)) {
+    let authorized = connection.participantRole === "TEACHER";
+    if (authorized && connection.userId !== null && connection.joinedSessionId !== null) {
+      const session = await deps.sessionRepository.getById(connection.joinedSessionId);
+      authorized = session !== null && session.creatorId === connection.userId;
+    }
+    if (!authorized) {
+      deps.log.warn({ eventType: type }, "WebSocket protocol error: teacher required");
+      sendProtocolError(
+        connection,
+        requestId,
+        {
+          code: "TEACHER_REQUIRED",
+          message: "This event requires a TEACHER participant",
+          details: null,
+        },
+        deps.log,
+      );
+      return;
+    }
   }
 
   try {

@@ -55,6 +55,27 @@ export class SessionRepository {
     return this.prisma.session.findUnique({ where: { id }, include: { creator: true } });
   }
 
+  /**
+   * Phase 10.6: create a session owned by an ALREADY authenticated user.
+   * Same atomic shape as createWithCreator (session + TEACHER participant or
+   * neither) but mints no user row — the creator identity comes from the
+   * verified token subject, never from request input.
+   */
+  public async createWithExistingCreator(input: { name: string; creatorId: string }): Promise<{
+    session: Session;
+    teacherParticipant: SessionParticipant;
+  }> {
+    return this.prisma.$transaction(async (tx) => {
+      const session = await tx.session.create({
+        data: { name: input.name, creatorId: input.creatorId },
+      });
+      const teacherParticipant = await tx.sessionParticipant.create({
+        data: { sessionId: session.id, userId: input.creatorId, role: "TEACHER" },
+      });
+      return { session, teacherParticipant };
+    });
+  }
+
   public async getByIdWithParticipants(id: string): Promise<{
     session: Session;
     participants: Array<SessionParticipant & { user: { id: string; displayName: string } }>;

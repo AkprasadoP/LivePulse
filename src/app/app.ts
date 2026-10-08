@@ -150,11 +150,14 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   await app.register(healthRoutes);
   await app.register(readyRoutes, { prisma: app.prisma });
   await app.register(metricsRoutes, { metrics: app.metrics });
-  await app.register(sessionRoutes, { prisma: app.prisma });
+  // One token service for HTTP auth, session ownership, and (via config in
+  // the WS layer) WS authentication — same secret everywhere by construction.
+  const authTokens = new TokenService(config.AUTH_ACCESS_SECRET);
+  await app.register(sessionRoutes, { prisma: app.prisma, tokens: authTokens });
   await app.register(quizRoutes, { prisma: app.prisma });
   await app.register(authRoutes, {
     prisma: app.prisma,
-    tokens: new TokenService(config.AUTH_ACCESS_SECRET),
+    tokens: authTokens,
   });
 
   app.get("/", async () => {

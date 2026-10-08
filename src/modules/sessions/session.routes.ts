@@ -11,9 +11,12 @@ import { createQuizSchema } from "../quizzes/quiz.schemas.js";
 import { QuizRepository } from "../quizzes/quiz.repository.js";
 import { serializeQuiz } from "../quizzes/quiz.serializer.js";
 import { NotFoundError } from "../../shared/errors.js";
+import type { TokenService } from "../auth/token.service.js";
+import { createOptionalAuthenticatePreHandler } from "../auth/authenticate.js";
 
 export interface SessionRoutesOptions {
   prisma: PrismaClient;
+  tokens: TokenService;
 }
 
 export async function sessionRoutes(
@@ -22,9 +25,48 @@ export async function sessionRoutes(
 ): Promise<void> {
   const sessions = new SessionRepository(options.prisma);
   const quizzes = new QuizRepository(options.prisma);
+  const tryAuthenticate = createOptionalAuthenticatePreHandler(options.tokens);
 
-  app.post("/sessions", async (request, reply) => {
+  app.post("/sessions", { preHandler: tryAuthenticate }, async (request, reply) => {
     const body = createSessionSchema.parse(request.body);
+
+    // Phase 10.6 ownership: an authenticated creator owns the session via
+    // their verified userId (body.creator is ignored — identity comes from
+    // the token, mirroring WS join precedence). Anonymous callers keep the
+    // legacy auto-provisioned creator path unchanged.
+    if (request.user !== undefined) {
+      const creator = await options.prisma.user.findUnique({
+        where: { id: request.user.id },
+      });
+      if (creator === null) {
+        const error = new Error("Authentication required") as Error & { statusCode?: number };
+        error.statusCode = 401;
+        throw error;
+      }
+      const { session, teacherParticipant } = await sessions.createWithExistingCreator({
+        name: body.name,
+        creatorId: creator.id,
+      });
+      reply.code(201);
+      return {
+        session: {
+          id: session.id,
+          name: session.name,
+          state: session.state,
+          startedAt: session.startedAt?.toISOString() ?? null,
+          endedAt: session.endedAt?.toISOString() ?? null,
+          createdAt: session.createdAt.toISOString(),
+          updatedAt: session.updatedAt.toISOString(),
+          creator: { id: creator.id, displayName: creator.displayName },
+        },
+        teacherParticipant: {
+          id: teacherParticipant.id,
+          role: teacherParticipant.role,
+          userId: creator.id,
+          joinedAt: teacherParticipant.joinedAt.toISOString(),
+        },
+      };
+    }
 
     const { session, creatorUser, teacherParticipant } = await sessions.createWithCreator({
       name: body.name,

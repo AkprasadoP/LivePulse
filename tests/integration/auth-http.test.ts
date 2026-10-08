@@ -15,6 +15,7 @@ describe("HTTP authentication (Phase 10.4)", () => {
   const prisma = new PrismaClient({ datasourceUrl: TEST_DATABASE_URL });
   let instance: IndependentInstance;
   const madeUsers: string[] = [];
+  const madeSessions: string[] = [];
 
   async function start(): Promise<void> {
     instance = await startIndependentInstance(`ws-auth-http-${Date.now()}`);
@@ -24,6 +25,10 @@ describe("HTTP authentication (Phase 10.4)", () => {
     await instance.close();
     await prisma.authSession.deleteMany();
     await prisma.credential.deleteMany();
+    if (madeSessions.length > 0) {
+      // Cascades to participants/quizzes/questions/answers/doubts.
+      await prisma.session.deleteMany({ where: { id: { in: madeSessions.splice(0) } } });
+    }
     if (madeUsers.length > 0) {
       await prisma.user.deleteMany({ where: { id: { in: madeUsers.splice(0) } } });
     }
@@ -247,6 +252,47 @@ describe("HTTP authentication (Phase 10.4)", () => {
           })
         ).statusCode,
       ).toBe(401);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("authenticated session creation binds ownership to the token user (body.creator ignored)", async () => {
+    await start();
+    try {
+      const email = `owner-${stamp()}@example.com`;
+      const displayName = `Owner-${stamp()}`;
+      const reg = await post("/auth/register", { email, password: "owner-pw-123", displayName });
+      expect(reg.statusCode).toBe(201);
+      const userId = reg.body.user.id as string;
+      madeUsers.push(userId);
+
+      // Authenticated: creator comes from the token, not the body.
+      const created = await post(
+        "/sessions",
+        { name: `Owned ${stamp()}`, creator: { displayName: "Someone-Else" } },
+        reg.body.accessToken,
+      );
+      expect(created.statusCode).toBe(201);
+      expect(created.body.session.creator.id).toBe(userId);
+      expect(created.body.session.creator.displayName).toBe(displayName);
+      expect(created.body.teacherParticipant.userId).toBe(userId);
+      expect(created.body.teacherParticipant.role).toBe("TEACHER");
+      madeSessions.push(created.body.session.id as string);
+
+      // Present-but-bad token is 401, never a silent legacy fallback.
+      const bad = await post("/sessions", { name: `Bad ${stamp()}` }, "bogus-token");
+      expect(bad.statusCode).toBe(401);
+
+      // Absent token keeps the legacy auto-provisioned path byte-identical.
+      const legacy = await post("/sessions", {
+        name: `Legacy ${stamp()}`,
+        creator: { displayName: `LegacyCreator-${stamp()}` },
+      });
+      expect(legacy.statusCode).toBe(201);
+      expect(legacy.body.session.creator.id).not.toBe(userId);
+      madeUsers.push(legacy.body.session.creator.id as string);
+      madeSessions.push(legacy.body.session.id as string);
     } finally {
       await stop();
     }
