@@ -6,6 +6,7 @@ import type { AppConfig } from "../config/index.js";
 import { prismaPlugin } from "../infrastructure/prisma/index.js";
 import { createMetrics, type Metrics } from "../infrastructure/metrics/index.js";
 import { healthRoutes } from "./routes/health.js";
+import { readyRoutes } from "./routes/ready.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { sessionRoutes } from "../modules/sessions/session.routes.js";
 import { quizRoutes } from "../modules/quizzes/quiz.routes.js";
@@ -53,17 +54,17 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       logStream !== undefined
         ? { level: config.LOG_LEVEL, stream: logStream, base: { instanceId: config.INSTANCE_ID } }
         : config.NODE_ENV === "test"
-        ? false // keep test output clean; assertions use the HTTP responses
-        : config.NODE_ENV === "development"
-          ? {
-              level: config.LOG_LEVEL,
-              // Log correlation (ADR-009): every line carries the logical
-              // instance id so multi-instance logs can be attributed.
-              base: { instanceId: config.INSTANCE_ID },
-              // Human-friendly logs locally; production keeps single-line JSON.
-              transport: { target: "pino-pretty" },
-            }
-          : { level: config.LOG_LEVEL, base: { instanceId: config.INSTANCE_ID } },
+          ? false // keep test output clean; assertions use the HTTP responses
+          : config.NODE_ENV === "development"
+            ? {
+                level: config.LOG_LEVEL,
+                // Log correlation (ADR-009): every line carries the logical
+                // instance id so multi-instance logs can be attributed.
+                base: { instanceId: config.INSTANCE_ID },
+                // Human-friendly logs locally; production keeps single-line JSON.
+                transport: { target: "pino-pretty" },
+              }
+            : { level: config.LOG_LEVEL, base: { instanceId: config.INSTANCE_ID } },
   });
 
   // One process-local registry per instance (never shared, never in Redis/PG).
@@ -145,6 +146,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   });
 
   await app.register(healthRoutes);
+  await app.register(readyRoutes, { prisma: app.prisma });
   await app.register(metricsRoutes, { metrics: app.metrics });
   await app.register(sessionRoutes, { prisma: app.prisma });
   await app.register(quizRoutes, { prisma: app.prisma });

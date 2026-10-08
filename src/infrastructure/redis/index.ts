@@ -29,6 +29,8 @@ export interface RedisInfrastructure {
   close(): Promise<void>;
   /** Diagnostics: whether the publisher connection is currently open. */
   get publisherReady(): boolean;
+  /** Diagnostics: whether the subscriber connection is currently open. */
+  get subscriberReady(): boolean;
 }
 
 export interface RedisInfrastructureOptions {
@@ -157,6 +159,10 @@ export function createRedisInfrastructure(
 
     get publisherReady() {
       return publisher.isReady;
+    },
+
+    get subscriberReady() {
+      return subscriber.isReady;
     },
   };
 }

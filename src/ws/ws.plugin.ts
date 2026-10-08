@@ -13,7 +13,10 @@ import { DoubtRepository } from "../modules/doubts/doubt.repository.js";
 import { handleClientEnvelope } from "./handlers.js";
 import { createDistributor, type Distributor } from "./distribution.js";
 import { PresenceTracker } from "./presence.js";
-import { createRedisInfrastructure } from "../infrastructure/redis/index.js";
+import {
+  createRedisInfrastructure,
+  type RedisInfrastructure,
+} from "../infrastructure/redis/index.js";
 import {
   clientEnvelopeSchema,
   errorMessage,
@@ -48,6 +51,12 @@ export interface WebSocketLayer {
   get connectionCount(): number;
   /** Phase 4: inter-instance distributor (present even when disabled, for tests). */
   distributor: Distributor;
+  /**
+   * Phase 9.5: the layer-owned Redis infrastructure, exposed so the /ready
+   * route can report dependency state from the same connections the app
+   * actually uses (no second client, no new truth mechanism).
+   */
+  redis: RedisInfrastructure;
   /**
    * Resolves once the Redis connections have finished their initial connect
    * attempt (resolves even when Redis is unreachable — publish/subscribe
@@ -404,6 +413,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     close,
     distributor,
     distributionReady,
+    redis,
     get connectionCount() {
       return registry.connectionCount;
     },

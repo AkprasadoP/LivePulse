@@ -132,6 +132,69 @@ doubt wire shape uses `doubtId`, not `id`. No app, schema, pool, PG, or
 nginx-balancing change; killing an instance mid-session stays in
 Phase 9.7 failure testing.
 
+## Readiness semantics — Phase 9.5 (`/health` vs `/ready`)
+
+`/health` is unchanged liveness (process alive → 200, no dependency
+checks). New `GET /ready` (`src/app/routes/ready.ts`, registered in
+`app.ts` alongside health) is traffic readiness:
+
+| State      | Code | Body                                                                |
+| ---------- | ---- | ------------------------------------------------------------------- |
+| Healthy    | 200  | `{"ready":true,"postgres":"ok","redis":"ok"}`                       |
+| Redis down | 200  | `{"ready":true,"postgres":"ok","redis":"degraded"}`                 |
+| PG down    | 503  | `{"ready":false,"postgres":"unavailable","redis":"ok"\|"degraded"}` |
+
+PostgreSQL gates readiness (sole durable truth; an instance that cannot
+reach it can serve nothing durable). Redis never flips the code —
+degraded-but-serving is the architecture Phase 7 built (local serving
+continues, propagation degraded). Bodies carry fixed enums only: no
+connection strings, errors, hostnames, or traces.
+
+Implementation notes: PG probe is one read-only `SELECT 1` via the
+existing client with a hard **1 s timeout** (≪ 10 s nginx interval — no
+indefinite hang, no pool amplification, no business repo/transaction/
+migration, no second pool). Redis state reuses the layer-owned
+connections (`publisherReady` + new `subscriberReady` accessor on the
+existing interface; `wsLayer` exposes the infra it already owns — no new
+truth mechanism, no duplicate state). Absent layer (non-listening/test)
+or never-connected reads as degraded. No new metric: `redisConnected`
+gauges and `dbOperationErrors` already export per-dependency state with
+bounded labels. Contract tests: `tests/integration/readiness.test.ts`
+(R1 healthy 200/ok, R2 PG-refused 503 + `/health` still 200, R3 Redis-dead
+200 degraded + local `POST /sessions` 201, R4 distribution-disabled
+degraded-never-unready).
+
+### Live topology results (prod stack, then cleaned)
+
+- Redis stopped: both instances `/ready` 200 degraded, `/health` 200,
+  session creation works; on restart clients auto-reconnect
+  (gauges back 1/1, `/ready` ok/ok).
+- PostgreSQL stopped: both `/ready` **503** unavailable with `/health`
+  still 200 (liveness/readiness split demonstrated, not just asserted);
+  on restart all `/ready` 200 again, via nginx too.
+- Kill/reconnect re-measured (fresh session, teacher killed): socket dead
+  191 ms / 1006; reconnect **2 attempts / 10,511 ms**; recovery complete.
+  Identical to the 9.4 baseline — **no failover improvement, as
+  predicted**: stock Nginx OSS has no active upstream health checking
+  (`health_check` verified unknown directive in `nginx:1.28-alpine`), so
+  it cannot poll `/ready`. Failover stays passive (`max_fails=1
+fail_timeout=10s`, now explicit in `nginx.conf` with zero behavior
+  change): first dead-hit costs `proxy_connect_timeout`, then the peer is
+  skipped. `/ready`'s value is orchestrator/operator/Compose-level and
+  future use — documented as such, not as an nginx behavior change. App
+  container healthchecks stay on `/health` (liveness); startup ordering
+  unchanged.
+
+### Measurement-hygiene incident (recorded, resolved)
+
+Mid-phase, placement assertions keyed on hardcoded container IPs (`.4` =
+app-1) produced impossible readings (101s "from" a dead peer) — Docker
+had reassigned `.4` to app-2 across container recreations. Resolution:
+the header mechanism was correct; the literal-IP map was stale (verified
+via `docker network inspect`). Rule going forward: refresh the IP→service
+map immediately before each run; combined `a, b` header values mean an
+internal nginx retry happened. No product behavior involved.
+
 ## Instance failure + recovery — Phase 9.4 (`docker kill`, no new mechanisms)
 
 Topology above with `app-1` (ws-a, .4) + `app-2` (ws-b, .5). Failure =
