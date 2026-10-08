@@ -1,9 +1,10 @@
 # LivePulse — HTTP API (Phase 1 + Phase 2/3 additions)
 
 Only the endpoints actually implemented are documented here. Authentication
-and the doubt queue do not exist yet. Quiz/question lifecycle transitions
-and answer submission are **WebSocket-only** (Phase 3) — see
-`docs/api/websocket-protocol.md`.
+has its own reference: `docs/api/authentication.md` (register / login /
+refresh / logout / me, token lifetimes, revocation semantics). Quiz/question
+lifecycle transitions and answer submission are **WebSocket-only** (Phase 3)
+— see `docs/api/websocket-protocol.md`.
 
 All responses are JSON. Errors use one consistent envelope:
 

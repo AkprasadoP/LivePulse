@@ -7,6 +7,7 @@ reconnection with server-side state recovery.
 **Engineering principles, phase plan and honesty rules live in `AGENT.md`.**
 Architecture: `docs/architecture/overview.md` · WebSocket:
 `docs/architecture/websocket-architecture.md` · API: `docs/api/http-api.md` ·
+Auth: `docs/api/authentication.md` ·
 WS protocol: `docs/api/websocket-protocol.md` · Schema:
 `docs/database/schema.md` · Decisions: `docs/decisions/`.
 
@@ -120,7 +121,7 @@ it):
 **Not implemented yet** (by design, in phase order): Dockerized
 multi-instance compose (tests spawn independent in-process instances today),
 Grafana dashboards/alerting, OpenTelemetry tracing, k6 load testing,
-authentication, attendance history. Do not assume any of this exists.
+attendance history. Do not assume any of this exists.
 
 ## Stack (as of Phase 7)
 
@@ -169,8 +170,9 @@ curl -s http://127.0.0.1:3100/health   # → {"status":"ok"}
 ```
 
 Full design, migration workflow, verification log and limits:
-`docs/architecture/production.md`. Still ahead: TLS, auth, orchestration
-(Phase 10 is authentication + authorization).
+`docs/architecture/production.md`. Still ahead: TLS and orchestration.
+Phase 10 (authentication + authorization) is implemented —
+`docs/api/authentication.md`.
 
 Phase 9.2 adds Nginx (`nginx/nginx.conf`, single upstream, no balancing)
 as the operator entrypoint on 127.0.0.1:3200; it proxies both HTTP and
@@ -236,6 +238,7 @@ curl -s http://localhost:3000/ws
 - `docs/architecture/overview.md` — what is actually implemented, per component
 - `docs/architecture/websocket-architecture.md` — WS topology, lifecycle, heartbeat, registry
 - `docs/api/http-api.md` — implemented endpoints, validation, error cases
+- `docs/api/authentication.md` — auth endpoints, tokens, revocation, historical data
 - `docs/api/websocket-protocol.md` — envelope, events, error codes, limits
 - `docs/database/schema.md` — entities, lifecycles, constraints, indexes
 - `docs/testing/websocket-testing.md` — how the WS layer is tested

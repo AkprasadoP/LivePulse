@@ -73,7 +73,7 @@ multi-instance compose** — that arrives in Phase 6.
 | ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------- |
 | TypeScript (strict) + Node ESM                        | ✅     |                                                                                         |
 | Fastify HTTP server + graceful shutdown               | ✅     | `src/app/app.ts`, `src/server.ts`                                                       |
-| Health endpoint (liveness only)                       | ✅     | does NOT probe PG/Redis by design                                                       |     | Zod env configuration, fail-fast                        | ✅  | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`, `INSTANCE_ID`, `DISTRIBUTION_ENABLED` |
+| Health endpoint (liveness only)                       | ✅     | does NOT probe PG/Redis by design                                                       |     | Zod env configuration, fail-fast                        | ✅  | `src/config/` incl. `WS_HEARTBEAT_INTERVAL_MS`, `INSTANCE_ID`, `DISTRIBUTION_ENABLED`                                      |
 | Pino structured logging                               | ✅     | pretty transport in development                                                         |
 | Domain schema (7 entities, 5 enums)                   | ✅     | `prisma/schema.prisma`, ADR-002                                                         |
 | Migrations                                            | ✅     | `20260922090904_init_domain` applied to dev + test DBs                                  |
@@ -88,8 +88,7 @@ multi-instance compose** — that arrives in Phase 6.
 | Heartbeat liveness (ping/pong + sweep)                | ✅     | one missed pong ⇒ terminate; default 30 s                                               |
 | WS integration tests over real sockets                | ✅     | 45 tests: lifecycle, protocol, session behavior, heartbeat, shutdown                    |
 | Integration tests vs real PostgreSQL                  | ✅     | 91 total incl. WS + distribution (API flows, DB constraints, quiz flow, races)          |
-| Quiz/question lifecycle transitions (WS, teacher)     | ✅     | `quiz.start` / `question.publish` / `question.close`; one-open-question DB index        |
-| Authenticated identity (token → user → participant)   | ✅     | Phase 10.7: participant resolved by `(sessionId, userId)`; displayName is presentation  |
+| Quiz/question lifecycle transitions (WS, teacher)     | ✅     | `quiz.start` / `question.publish` / `question.close`; one-open-question DB index        |     | Authenticated identity (token → user → participant)     | ✅  | Phase 10.7/10.9: participant resolved by `(sessionId, userId)`; displayName is presentation (`docs/api/authentication.md`) |
 | Answer submission + first-correct-wins election       | ✅     | ADR-004: FOR NO KEY UPDATE + partial unique index; duplicates replay verdicts           |
 | Leaderboard (per question, derived from answers)      | ✅     | `leaderboard.updated` broadcasts; no ranking state cached                               |
 | Concurrency tests (10/50/100 + mixed races)           | ✅     | exactly one winner on every run — `docs/testing/concurrency.md`                         |
@@ -97,7 +96,7 @@ multi-instance compose** — that arrives in Phase 6.
 | Cross-instance integration tests (2 real instances)   | ✅     | `distributed.test.ts`: A–E + cross-instance 20-way race + shutdown regression           |
 | Reconnect recovery (`session.joined.recovery`)        | ✅     | ADR-006: PostgreSQL snapshot at join; instance-agnostic; no replay (`recovery.test.ts`) |
 | Dockerized multi-instance compose (2 app containers)  | ❌     | later phase (tests spawn independent in-process instances today)                        |
-| Presence broadcasting                                 | ❌     | later phase                                                                             |     | Doubt queue (`doubt.create/resolve/dismiss/queue.list`) | ✅  | ADR-007: `enqueueSeq` ordering in PostgreSQL; Redis notification-only                 |
+| Presence broadcasting                                 | ❌     | later phase                                                                             |     | Doubt queue (`doubt.create/resolve/dismiss/queue.list`) | ✅  | ADR-007: `enqueueSeq` ordering in PostgreSQL; Redis notification-only                                                      |
 | Presence (Redis structures)                           | ❌     | later phase                                                                             |
 | Nginx, Prometheus, Grafana, k6                        | ❌     | deliberately deferred (§16, §18)                                                        |
 
@@ -147,7 +146,7 @@ docs/
 ├── decisions/                ADR-001…006 (foundation, domain, WS foundation,
 │                             first-correct-answer, Redis Pub/Sub boundary,
 │                             reconnect recovery)
-├── api/                      http-api.md, websocket-protocol.md
+├── api/                      http-api.md, authentication.md, websocket-protocol.md
 ├── database/schema.md        entities, states, constraints, indexes
 └── testing/websocket-testing.md
 load-tests/                   (empty until Phase 10)
