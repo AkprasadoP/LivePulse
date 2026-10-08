@@ -10,6 +10,7 @@ import {
   WsTestClient,
   connectWsClient,
   waitFor,
+  registerAndCreateSession,
   TEST_DATABASE_URL,
 } from "./helpers.js";
 import { loadConfig } from "../../src/config/index.js";
@@ -62,13 +63,7 @@ describe("WebSocket connection lifecycle (integration)", () => {
   });
 
   it("tracks multiple connections to the same session independently", async () => {
-    const created = await app.inject({
-      method: "POST",
-      url: "/sessions",
-      payload: JSON.stringify({ name: "Multi-conn" }),
-      headers: { "content-type": "application/json" },
-    });
-    const sessionId = (created.json() as { session: { id: string } }).session.id;
+    const { sessionId } = await registerAndCreateSession(app, "Multi-conn");
 
     const first = await connectWsClient();
     const second = await connectWsClient();
@@ -99,13 +94,7 @@ describe("WebSocket connection lifecycle (integration)", () => {
   });
 
   it("removes a connection from the registry when its socket closes", async () => {
-    const created = await app.inject({
-      method: "POST",
-      url: "/sessions",
-      payload: JSON.stringify({ name: "Cleanup" }),
-      headers: { "content-type": "application/json" },
-    });
-    const sessionId = (created.json() as { session: { id: string } }).session.id;
+    const { sessionId } = await registerAndCreateSession(app, "Cleanup");
 
     const layer = app.wsLayer;
     const client = await connectWsClient();

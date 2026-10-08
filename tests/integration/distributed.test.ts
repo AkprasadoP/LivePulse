@@ -6,6 +6,7 @@ import {
   startIndependentInstance,
   connectToInstance,
   joinAs,
+  registerAndCreateSession,
   WsTestClient,
   waitForAsync,
   type IndependentInstance,
@@ -53,13 +54,12 @@ describe("Cross-instance distribution (integration)", () => {
     // Correct answer deliberately NON-hex ("Berlin") so the no-leak assertion
     // cannot collide with UUID hex characters.
     const correctAnswer = "Berlin";
-    const created = await requestA("POST", "/sessions", {
-      name: `Dist ${Date.now()}`,
-      creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-    });
-    expect(created.statusCode).toBe(201);
-    const sessionId = created.body.session.id as string;
-    const teacherName = created.body.session.creator.displayName as string;
+    // Phase 10.7: creation requires an authenticated owner; the registered
+    // creator identity (teacherName) is reused by joinAs below.
+    const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
+      a.app,
+      `Dist ${Date.now()}`,
+    );
 
     const quizResponse = await requestA("POST", `/sessions/${sessionId}/quizzes`, {
       title: "Distribution quiz",
@@ -381,13 +381,10 @@ describe("Redis-unavailable degradation (integration)", () => {
       });
       return { statusCode: response.statusCode, body: response.json() as any };
     };
-    const created = await requestSolo("POST", "/sessions", {
-      name: `Solo ${Date.now()}`,
-      creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-    });
-    expect(created.statusCode).toBe(201);
-    const sessionId = created.body.session.id as string;
-    const teacherName = created.body.session.creator.displayName as string;
+    const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
+      solo.app,
+      `Solo ${Date.now()}`,
+    );
     const quizResponse = await requestSolo("POST", `/sessions/${sessionId}/quizzes`, {
       title: "Solo quiz",
       questions: [{ prompt: "Q", correctAnswer: "42" }],

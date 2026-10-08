@@ -53,21 +53,21 @@ Cover the semantics that must hold independently of transport:
 
 ## Integration scenarios (13)
 
-| #   | Scenario                                | What it proves                                                                                             |
-| --- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| P1  | join announces the participant to itself | the joining connection receives `presence.snapshot` after `session.joined`, exactly once (ordering + no duplicate) |
-| P2  | new participant joins                   | existing clients receive an updated aggregate (both participants)                                          |
-| P3  | participant on WS-A, observer on WS-B    | cross-instance presence via Redis notice, in both directions                                                |
-| P4  | graceful leave                          | the departed participant disappears from the other instance's view                                          |
+| #   | Scenario                                     | What it proves                                                                                                                                                      |
+| --- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1  | join announces the participant to itself     | the joining connection receives `presence.snapshot` after `session.joined`, exactly once (ordering + no duplicate)                                                  |
+| P2  | new participant joins                        | existing clients receive an updated aggregate (both participants)                                                                                                   |
+| P3  | participant on WS-A, observer on WS-B        | cross-instance presence via Redis notice, in both directions                                                                                                        |
+| P4  | graceful leave                               | the departed participant disappears from the other instance's view                                                                                                  |
 | P5  | one of two connections closes (multi-device) | registry still holds the participant; **no** snapshot omitting them over 3 digest cycles; **no** `offline` transition; the final close does announce and does count |
-| P6  | view-only join                          | an empty snapshot, and a later participant sees only themselves                                             |
-| P7  | same participant bound on WS-A and WS-B  | losing one instance's connection leaves them online (only if BOTH close do they disappear)                  |
-| P8  | reconnect                               | a fresh connection reconciles to the CURRENT aggregate (local + remote), not a stale one                    |
-| P9  | distribution degraded                    | local presence and durable work are unaffected when the instance takes no part in distribution              |
-| P10 | crashed instance (ghost notice)          | a peer that announces once and never speaks again is visible briefly, then expires at `3 × digest`          |
-| P11 | graceful instance shutdown               | the departing instance withdraws its local set immediately — well before the staleness window                |
-| P12 | heartbeat termination                    | a frozen client is swept, its presence is removed, and the close is counted as `reason="heartbeat"`         |
-| P13 | persistence check                        | presence writes no rows (`users`, `session_participants` unchanged across digest cycles and departures) and no presence/connection table exists |
+| P6  | view-only join                               | an empty snapshot, and a later participant sees only themselves                                                                                                     |
+| P7  | same participant bound on WS-A and WS-B      | losing one instance's connection leaves them online (only if BOTH close do they disappear)                                                                          |
+| P8  | reconnect                                    | a fresh connection reconciles to the CURRENT aggregate (local + remote), not a stale one                                                                            |
+| P9  | distribution degraded                        | local presence and durable work are unaffected when the instance takes no part in distribution                                                                      |
+| P10 | crashed instance (ghost notice)              | a peer that announces once and never speaks again is visible briefly, then expires at `3 × digest`                                                                  |
+| P11 | graceful instance shutdown                   | the departing instance withdraws its local set immediately — well before the staleness window                                                                       |
+| P12 | heartbeat termination                        | a frozen client is swept, its presence is removed, and the close is counted as `reason="heartbeat"`                                                                 |
+| P13 | persistence check                            | presence writes no rows (`users`, `session_participants` unchanged across digest cycles and departures) and no presence/connection table exists                     |
 
 Stability: the 13 scenario tests plus the 11 observability tests were run **3
 consecutive times** with 24/24 passing each run.
@@ -103,23 +103,23 @@ consecutive times** with 24/24 passing each run.
   client; a partition between instances is covered only by the staleness path.
 - **Presence under sustained load** (hundreds of sockets, many sessions):
   Phase 8 measures it; no number is claimed here.
-- **Identity:** presence reports the displayName-bound participant. The Phase 3
-  seam limitation (a name is not a credential) is inherited and unchanged.
+- **Identity:** presence reports the participant bound by the authenticated
+  `(sessionId, userId)` membership; `displayName` is a presentation label.
 
 ## Coverage against the Phase 7 requirements
 
-| Required presence test                                  | Covered by          |
-| ------------------------------------------------------- | ------------------- |
-| participant joins → presence announced                  | P1, P2              |
-| participant leaves → presence removed                   | P4                  |
-| two connections, one closes → still online              | P5                  |
-| only after the final connection → offline               | P5                  |
-| same participant on WS-A and WS-B                       | P7                  |
-| cross-instance propagation                              | P3, P4, P5, P7      |
-| local presence works without distribution/Redis         | P9 + unit tests     |
-| propagation resumes (missed notice repaired)            | unit tests + P10    |
-| heartbeat termination removes presence                  | P12                 |
-| instance shutdown removes local presence                | P11                 |
+| Required presence test                                  | Covered by                                        |
+| ------------------------------------------------------- | ------------------------------------------------- |
+| participant joins → presence announced                  | P1, P2                                            |
+| participant leaves → presence removed                   | P4                                                |
+| two connections, one closes → still online              | P5                                                |
+| only after the final connection → offline               | P5                                                |
+| same participant on WS-A and WS-B                       | P7                                                |
+| cross-instance propagation                              | P3, P4, P5, P7                                    |
+| local presence works without distribution/Redis         | P9 + unit tests                                   |
+| propagation resumes (missed notice repaired)            | unit tests + P10                                  |
+| heartbeat termination removes presence                  | P12                                               |
+| instance shutdown removes local presence                | P11                                               |
 | duplicate presence notifications do not corrupt clients | unit `snapshotIfChanged` + P1–P8 (set assertions) |
-| reconnect gets current presence                         | P8                  |
-| presence does not write PostgreSQL                      | P13                 |
+| reconnect gets current presence                         | P8                                                |
+| presence does not write PostgreSQL                      | P13                                               |

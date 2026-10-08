@@ -40,7 +40,7 @@ the session).
 | `doubts`               | A raised question from a participant     | session + participant  | `OPEN → RESOLVED` / `OPEN → DISMISSED`           |
 
 Phase 3 additions: quiz/question state machines are now **driven** (see
-§3), `users.displayName` is unique (identity seam), `answers.isWinner`
+§3), `users.displayName` is unique (presentation label), `answers.isWinner`
 exists with a partial unique index enforcing the one-winner invariant, and
 at most one question per quiz may be `PUBLISHED` at a time (partial unique
 index). See `docs/decisions/004` for the election design.
@@ -91,11 +91,11 @@ twice or publishing a non-`DRAFT` question is
 
 ### users
 
-| Field         | Type         | Notes                                                                                                                                                                  |
-| ------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`          | UUID PK      | `uuidv7()` generated client-side (sortable IDs)                                                                                                                        |
-| `displayName` | varchar(100) | non-null; **UNIQUE since Phase 3** (identity seam: stable find-or-create by name until authentication lands — documented in ADR-004's context and the WS protocol doc) |
-| `createdAt`   | timestamptz  | default now                                                                                                                                                            |
+| Field         | Type         | Notes                                                                                                                                                            |
+| ------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`          | UUID PK      | `uuidv7()` generated client-side (sortable IDs)                                                                                                                  |
+| `displayName` | varchar(100) | non-null; **UNIQUE since Phase 3** — a globally unique presentation label. It is NOT an identity/credential (Phase 10.7: identity is the authenticated `userId`) |
+| `createdAt`   | timestamptz  | default now                                                                                                                                                      |
 
 ### sessions
 
@@ -208,7 +208,7 @@ on read), resolver identity (deferred), reopen (terminal states are final).
 Uniques also create implicit indexes: `(sessionId,userId)` on
 `session_participants`, `(quizId,position)` on `questions`,
 `(questionId,participantId,attemptNumber)` on `answers`, and
-`users.displayName` (Phase 3 identity seam).
+`users.displayName` (unique presentation label).
 
 > Note: partial unique indexes are hand-completed in migration SQL because
 > Prisma cannot express them in its DSL: the Phase 3 winner / one-published-

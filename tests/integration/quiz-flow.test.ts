@@ -8,6 +8,7 @@ import {
   connectWsClient,
   joinAs,
   createLiveQuizScenario,
+  registerAndCreateSession,
   WsTestClient,
 } from "./helpers.js";
 
@@ -368,17 +369,10 @@ describe("Live quiz flow (integration)", () => {
   it("rejects teacher operations before the session is LIVE", async () => {
     // createLiveQuizScenario moves the session to LIVE; roll it back is not
     // possible (state machine), so create a fresh CREATED session instead.
-    const teacherDisplayName = `Teacher-${Math.random().toString(36).slice(2, 10)}`;
-    const created = await app.inject({
-      method: "POST",
-      url: "/sessions",
-      payload: JSON.stringify({
-        name: "Not live yet",
-        creator: { displayName: teacherDisplayName },
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    const sessionId = (created.json() as { session: { id: string } }).session.id;
+    const { sessionId, creatorDisplayName: teacherDisplayName } = await registerAndCreateSession(
+      app,
+      "Not live yet",
+    );
     const quizResponse = await app.inject({
       method: "POST",
       url: `/sessions/${sessionId}/quizzes`,

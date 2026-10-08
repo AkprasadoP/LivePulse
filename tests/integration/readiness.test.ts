@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app/app.js";
 import { loadConfig } from "../../src/config/index.js";
-import { TEST_DATABASE_URL, resetDatabase, startIndependentInstance, WsTestClient } from "./helpers.js";
+import {
+  TEST_DATABASE_URL,
+  resetDatabase,
+  startIndependentInstance,
+  registerAndCreateSession,
+  WsTestClient,
+} from "./helpers.js";
 import { PrismaClient } from "@prisma/client";
 
 /**
@@ -43,7 +49,12 @@ describe("readiness (Phase 9.5)", () => {
       expect((await app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
       const ready = await app.inject({ method: "GET", url: "/ready" });
       expect(ready.statusCode).toBe(503);
-      expect(ready.json()).toEqual({ ready: false, draining: false, postgres: "unavailable", redis: "ok" });
+      expect(ready.json()).toEqual({
+        ready: false,
+        draining: false,
+        postgres: "unavailable",
+        redis: "ok",
+      });
     } finally {
       await app.close();
     }
@@ -63,19 +74,17 @@ describe("readiness (Phase 9.5)", () => {
     try {
       const ready = await app.inject({ method: "GET", url: "/ready" });
       expect(ready.statusCode).toBe(200);
-      expect(ready.json()).toEqual({ ready: true, draining: false, postgres: "ok", redis: "degraded" });
-
-      // Degraded is serving, not outage: session creation (PG-backed) works.
-      const created = await app.inject({
-        method: "POST",
-        url: "/sessions",
-        payload: JSON.stringify({
-          name: `ready-local-${Date.now()}`,
-          creator: { displayName: `ready-local-${Date.now()}` },
-        }),
-        headers: { "content-type": "application/json" },
+      expect(ready.json()).toEqual({
+        ready: true,
+        draining: false,
+        postgres: "ok",
+        redis: "degraded",
       });
-      expect(created.statusCode).toBe(201);
+
+      // Degraded is serving, not outage: authenticated session creation
+      // (PG-backed) still works with Redis unreachable.
+      const { sessionId } = await registerAndCreateSession(app, `ready-local-${Date.now()}`);
+      expect(sessionId).toBeTruthy();
     } finally {
       await app.close();
       await prisma.$disconnect();
@@ -89,7 +98,12 @@ describe("readiness (Phase 9.5)", () => {
     try {
       const ready = await instance.app.inject({ method: "GET", url: "/ready" });
       expect(ready.statusCode).toBe(200);
-      expect(ready.json()).toEqual({ ready: true, draining: false, postgres: "ok", redis: "degraded" });
+      expect(ready.json()).toEqual({
+        ready: true,
+        draining: false,
+        postgres: "ok",
+        redis: "degraded",
+      });
     } finally {
       await instance.close();
     }

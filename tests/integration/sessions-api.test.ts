@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startTestApp, stopTestApp, resetDatabase, type IntegrationContext } from "./helpers.js";
+import {
+  startTestApp,
+  stopTestApp,
+  resetDatabase,
+  registerTestUser,
+  type IntegrationContext,
+} from "./helpers.js";
 
 describe("Sessions API (integration)", () => {
   let ctx: IntegrationContext;
@@ -16,12 +22,24 @@ describe("Sessions API (integration)", () => {
     await stopTestApp();
   });
 
+  // Phase 10.7: creation requires authentication; the creator is the token
+  // subject. Each test registers a fresh user (resetDatabase wipes rows).
+  let userCounter = 0;
+  async function authHeaders(): Promise<Record<string, string>> {
+    userCounter += 1;
+    const identity = await registerTestUser(`ApiCreator-${userCounter}-${Date.now()}`);
+    return { authorization: `Bearer ${identity.accessToken}` };
+  }
+
   describe("POST /sessions", () => {
-    it("creates a session with an auto-provisioned TEACHER creator", async () => {
-      const { statusCode, body } = await ctx.request("POST", "/sessions", {
-        name: "Physics — Current Electricity",
-        creator: { displayName: "Dr. Ohm" },
-      });
+    it("creates a session owned by the authenticated creator (TEACHER)", async () => {
+      const headers = await authHeaders();
+      const { statusCode, body } = await ctx.request(
+        "POST",
+        "/sessions",
+        { name: "Physics — Current Electricity" },
+        headers,
+      );
 
       expect(statusCode).toBe(201);
       expect(body.session).toMatchObject({
@@ -29,8 +47,8 @@ describe("Sessions API (integration)", () => {
         state: "CREATED",
         startedAt: null,
         endedAt: null,
-        creator: { displayName: "Dr. Ohm" },
       });
+      expect(body.session.creator.displayName).toMatch(/^ApiCreator-/);
       expect(body.session.id).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       );
@@ -38,20 +56,23 @@ describe("Sessions API (integration)", () => {
       expect(body.teacherParticipant.userId).toBe(body.session.creator.id);
     });
 
-    it("defaults the creator displayName when none is provided", async () => {
+    it("rejects unauthenticated creation with 401 (legacy anonymous path retired)", async () => {
       const { statusCode, body } = await ctx.request("POST", "/sessions", {
-        name: "Biology 101",
+        name: "Nope",
+        creator: { displayName: "Ghost" },
       });
-      expect(statusCode).toBe(201);
-      // Phase 3 identity seam: displayName is globally unique, so the default
-      // is a random "Teacher-xxxxxxxx" (collision-free), not a fixed name.
-      expect(body.session.creator.displayName).toMatch(/^Teacher-[0-9a-f]{8}$/);
+      expect(statusCode).toBe(401);
+      expect(body.error).toBe("Unauthorized");
     });
 
     it("persists the session and its teacher participant durably", async () => {
-      const { body } = await ctx.request("POST", "/sessions", {
-        name: "Persisted session",
-      });
+      const headers = await authHeaders();
+      const { body } = await ctx.request(
+        "POST",
+        "/sessions",
+        { name: "Persisted session" },
+        headers,
+      );
 
       const userCount = await ctx.prisma.user.count();
       const sessionCount = await ctx.prisma.session.count();
@@ -66,30 +87,39 @@ describe("Sessions API (integration)", () => {
     });
 
     it("rejects a missing name with 400", async () => {
-      const { statusCode, body } = await ctx.request("POST", "/sessions", {});
+      const headers = await authHeaders();
+      const { statusCode, body } = await ctx.request("POST", "/sessions", {}, headers);
       expect(statusCode).toBe(400);
       expect(body.error).toBe("Bad Request");
       expect(body.details.some((d: any) => d.path === "name")).toBe(true);
     });
 
     it("rejects an empty name with 400", async () => {
-      const { statusCode } = await ctx.request("POST", "/sessions", { name: "" });
+      const headers = await authHeaders();
+      const { statusCode } = await ctx.request("POST", "/sessions", { name: "" }, headers);
       expect(statusCode).toBe(400);
     });
 
     it("rejects a name longer than 200 characters with 400", async () => {
-      const { statusCode } = await ctx.request("POST", "/sessions", {
-        name: "x".repeat(201),
-      });
+      const headers = await authHeaders();
+      const { statusCode } = await ctx.request(
+        "POST",
+        "/sessions",
+        {
+          name: "x".repeat(201),
+        },
+        headers,
+      );
       expect(statusCode).toBe(400);
     });
 
     it("rejects malformed JSON with 400 (Fastify body parser)", async () => {
+      const headers = await authHeaders();
       const response = await ctx.app.inject({
         method: "POST",
         url: "/sessions",
         payload: "{not json",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...headers },
       });
       expect(response.statusCode).toBe(400);
     });
@@ -97,20 +127,17 @@ describe("Sessions API (integration)", () => {
 
   describe("GET /sessions/:sessionId", () => {
     it("returns the session with its participants", async () => {
-      const created = await ctx.request("POST", "/sessions", {
-        name: "Chemistry",
-        creator: { displayName: "Ms. Curie" },
-      });
+      const headers = await authHeaders();
+      const created = await ctx.request("POST", "/sessions", { name: "Chemistry" }, headers);
 
       const { statusCode, body } = await ctx.request("GET", `/sessions/${created.body.session.id}`);
 
       expect(statusCode).toBe(200);
       expect(body.session.name).toBe("Chemistry");
-      expect(body.session.creator.displayName).toBe("Ms. Curie");
+      expect(body.session.creator.displayName).toMatch(/^ApiCreator-/);
       expect(body.participants).toHaveLength(1);
       expect(body.participants[0]).toMatchObject({
         role: "TEACHER",
-        displayName: "Ms. Curie",
       });
     });
 
@@ -131,7 +158,8 @@ describe("Sessions API (integration)", () => {
 
   describe("POST /sessions/:sessionId/state", () => {
     it("performs the full approved lifecycle CREATED -> LIVE -> ENDED", async () => {
-      const created = await ctx.request("POST", "/sessions", { name: "Lifecycle" });
+      const headers = await authHeaders();
+      const created = await ctx.request("POST", "/sessions", { name: "Lifecycle" }, headers);
       const id = created.body.session.id;
 
       const live = await ctx.request("POST", `/sessions/${id}/state`, { state: "LIVE" });
@@ -147,7 +175,8 @@ describe("Sessions API (integration)", () => {
     });
 
     it("allows cancel before live: CREATED -> ENDED (approved decision)", async () => {
-      const created = await ctx.request("POST", "/sessions", { name: "Cancelled" });
+      const headers = await authHeaders();
+      const created = await ctx.request("POST", "/sessions", { name: "Cancelled" }, headers);
       const { statusCode, body } = await ctx.request(
         "POST",
         `/sessions/${created.body.session.id}/state`,
@@ -162,7 +191,8 @@ describe("Sessions API (integration)", () => {
     });
 
     it("rejects ENDED -> LIVE with 409 (terminal state)", async () => {
-      const created = await ctx.request("POST", "/sessions", { name: "Terminal" });
+      const headers = await authHeaders();
+      const created = await ctx.request("POST", "/sessions", { name: "Terminal" }, headers);
       const id = created.body.session.id;
       await ctx.request("POST", `/sessions/${id}/state`, { state: "LIVE" });
       await ctx.request("POST", `/sessions/${id}/state`, { state: "ENDED" });
@@ -176,7 +206,8 @@ describe("Sessions API (integration)", () => {
     });
 
     it("rejects ENDED -> CREATED and LIVE -> CREATED semantics (no such target) with 400", async () => {
-      const created = await ctx.request("POST", "/sessions", { name: "Bad target" });
+      const headers = await authHeaders();
+      const created = await ctx.request("POST", "/sessions", { name: "Bad target" }, headers);
       const { statusCode } = await ctx.request(
         "POST",
         `/sessions/${created.body.session.id}/state`,
@@ -199,7 +230,8 @@ describe("Sessions API (integration)", () => {
 
   describe("quizzes under a session", () => {
     it("returns the quizzes of a session via the session-scoped endpoint and keeps quiz data consistent", async () => {
-      const session = await ctx.request("POST", "/sessions", { name: "Quiz host" });
+      const headers = await authHeaders();
+      const session = await ctx.request("POST", "/sessions", { name: "Quiz host" }, headers);
       const sessionId = session.body.session.id;
 
       await ctx.request("POST", `/sessions/${sessionId}/quizzes`, {

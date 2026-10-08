@@ -20,15 +20,15 @@ produce them.
 
 ## 2. `/metrics` contract
 
-| Property        | Behavior                                                                                                 |
-| --------------- | -------------------------------------------------------------------------------------------------------- |
-| Route           | `GET /metrics` on the existing HTTP port (same server as HTTP + `/ws`)                                    |
-| Format          | Prometheus text exposition (`text/plain; version=0.0.4`)                                                  |
-| Authentication  | **none** in Phase 7 — an ops/dev endpoint; auth arrives with the auth phase                               |
-| Scope           | this instance's process-local registry only; instances are scraped separately                             |
-| Dependencies    | **none** — the handler renders memory only; it never queries PostgreSQL or Redis                          |
-| Disabled mode   | `METRICS_ENABLED=false` registers the route but answers `404`; `app.metrics` is `null`                    |
-| Failure mode    | a metrics failure can never affect a request path; handlers call `.inc()`/`.observe()` without awaiting   |
+| Property       | Behavior                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------- |
+| Route          | `GET /metrics` on the existing HTTP port (same server as HTTP + `/ws`)                                  |
+| Format         | Prometheus text exposition (`text/plain; version=0.0.4`)                                                |
+| Authentication | **none** in Phase 7 — an ops/dev endpoint; auth arrives with the auth phase                             |
+| Scope          | this instance's process-local registry only; instances are scraped separately                           |
+| Dependencies   | **none** — the handler renders memory only; it never queries PostgreSQL or Redis                        |
+| Disabled mode  | `METRICS_ENABLED=false` registers the route but answers `404`; `app.metrics` is `null`                  |
+| Failure mode   | a metrics failure can never affect a request path; handlers call `.inc()`/`.observe()` without awaiting |
 
 `GET /health` is deliberately **unchanged**: liveness only, no PostgreSQL, no
 Redis, no readiness semantics. Dependency state is exposed through metrics and
@@ -41,75 +41,75 @@ a log field and the target's identity in the scrape configuration.
 
 ### WebSocket transport
 
-| Metric                                                                                  | Type      | Labels   | Purpose                                                            |
-| --------------------------------------------------------------------------------------- | --------- | -------- | ------------------------------------------------------------------ |
-| `livepulse_ws_connections_active`                                                       | Gauge     | –        | live sockets on this instance right now                            |
-| `livepulse_ws_connections_opened_total`                                                 | Counter   | –        | accepted upgrades (churn / load driver)                            |
-| `livepulse_ws_connections_closed_total`                                                 | Counter   | `reason` | `client` (peer closed / error) vs `heartbeat` (liveness sweep)      |
-| `livepulse_ws_messages_received_total`                                                  | Counter   | –        | inbound frames (throughput)                                        |
-| `livepulse_ws_messages_sent_total`                                                      | Counter   | –        | frames this instance wrote (local + remote-rendered + presence)     |
-| `livepulse_ws_protocol_errors_total`                                                    | Counter   | `code`   | rejected frames by protocol error code                             |
-| `livepulse_ws_handler_duration_seconds`                                                 | Histogram | `event`  | time inside one client-event handler (incl. durable work)          |
+| Metric                                  | Type      | Labels   | Purpose                                                         |
+| --------------------------------------- | --------- | -------- | --------------------------------------------------------------- |
+| `livepulse_ws_connections_active`       | Gauge     | –        | live sockets on this instance right now                         |
+| `livepulse_ws_connections_opened_total` | Counter   | –        | accepted upgrades (churn / load driver)                         |
+| `livepulse_ws_connections_closed_total` | Counter   | `reason` | `client` (peer closed / error) vs `heartbeat` (liveness sweep)  |
+| `livepulse_ws_messages_received_total`  | Counter   | –        | inbound frames (throughput)                                     |
+| `livepulse_ws_messages_sent_total`      | Counter   | –        | frames this instance wrote (local + remote-rendered + presence) |
+| `livepulse_ws_protocol_errors_total`    | Counter   | `code`   | rejected frames by protocol error code                          |
+| `livepulse_ws_handler_duration_seconds` | Histogram | `event`  | time inside one client-event handler (incl. durable work)       |
 
 ### Sessions
 
-| Metric                                 | Type    | Labels   | Purpose                                                     |
-| -------------------------------------- | ------- | -------- | ----------------------------------------------------------- |
-| `livepulse_sessions_with_connections`  | Gauge   | –        | sessions with ≥1 local connection (fan-out scope)           |
-| `livepulse_session_joins_total`        | Counter | `role`   | accepted joins: `TEACHER` / `STUDENT` / `viewer`             |
-| `livepulse_session_leaves_total`       | Counter | `reason` | `leave` (explicit) / `switch` (re-join) / `disconnect`       |
+| Metric                                | Type    | Labels   | Purpose                                                |
+| ------------------------------------- | ------- | -------- | ------------------------------------------------------ |
+| `livepulse_sessions_with_connections` | Gauge   | –        | sessions with ≥1 local connection (fan-out scope)      |
+| `livepulse_session_joins_total`       | Counter | `role`   | accepted joins: `TEACHER` / `STUDENT` / `viewer`       |
+| `livepulse_session_leaves_total`      | Counter | `reason` | `leave` (explicit) / `switch` (re-join) / `disconnect` |
 
 ### Presence (ADR-008)
 
-| Metric                                    | Type    | Labels   | Purpose                                                       |
-| ----------------------------------------- | ------- | -------- | ------------------------------------------------------------- |
-| `livepulse_presence_local_participants`   | Gauge   | –        | distinct participants with a bound local connection right now |
-| `livepulse_presence_transitions_total`    | Counter | `state`  | local participant transitions: `online` / `offline`           |
-| `livepulse_presence_remote_instances`     | Gauge   | –        | peer instances currently contributing fresh presence          |
-| `livepulse_presence_reconcile_total`      | Counter | `result` | `digest` (tick with local sessions) / `expired` (peer dropped) |
+| Metric                                  | Type    | Labels   | Purpose                                                        |
+| --------------------------------------- | ------- | -------- | -------------------------------------------------------------- |
+| `livepulse_presence_local_participants` | Gauge   | –        | distinct participants with a bound local connection right now  |
+| `livepulse_presence_transitions_total`  | Counter | `state`  | local participant transitions: `online` / `offline`            |
+| `livepulse_presence_remote_instances`   | Gauge   | –        | peer instances currently contributing fresh presence           |
+| `livepulse_presence_reconcile_total`    | Counter | `result` | `digest` (tick with local sessions) / `expired` (peer dropped) |
 
 These describe **infrastructure state**, not registered users: they must never
 be read as "total participants in the system".
 
 ### Redis
 
-| Metric                                 | Type    | Labels        | Purpose                                                    |
-| -------------------------------------- | ------- | ------------- | ---------------------------------------------------------- |
-| `livepulse_redis_connected`            | Gauge   | `connection`  | `1` when usable; `0` on `end`/`reconnecting`               |
-| `livepulse_redis_connection_errors_total` | Counter | `connection` | errors observed, including failed reconnect attempts      |
-| `livepulse_redis_publish_total`        | Counter | `result`      | `ok` / `error` — post-commit notice publish attempts       |
-| `livepulse_redis_events_received_total`| Counter | –             | notices received from Redis                                |
-| `livepulse_redis_events_ignored_total` | Counter | `reason`      | `echo` / `schema_version` / `unknown_type` / `invalid_payload` / `no_local_subscribers` |
-| `livepulse_redis_events_rendered_total`| Counter | –             | notices rendered to ≥1 local connection                    |
+| Metric                                    | Type    | Labels       | Purpose                                                                                 |
+| ----------------------------------------- | ------- | ------------ | --------------------------------------------------------------------------------------- |
+| `livepulse_redis_connected`               | Gauge   | `connection` | `1` when usable; `0` on `end`/`reconnecting`                                            |
+| `livepulse_redis_connection_errors_total` | Counter | `connection` | errors observed, including failed reconnect attempts                                    |
+| `livepulse_redis_publish_total`           | Counter | `result`     | `ok` / `error` — post-commit notice publish attempts                                    |
+| `livepulse_redis_events_received_total`   | Counter | –            | notices received from Redis                                                             |
+| `livepulse_redis_events_ignored_total`    | Counter | `reason`     | `echo` / `schema_version` / `unknown_type` / `invalid_payload` / `no_local_subscribers` |
+| `livepulse_redis_events_rendered_total`   | Counter | –            | notices rendered to ≥1 local connection                                                 |
 
 Publish failures and subscription problems are distinguishable (result labels
 vs connection gauges), which is what makes a degraded-mode incident readable.
 
 ### Durable operations
 
-| Metric                                      | Type      | Labels      | Purpose                                                      |
-| ------------------------------------------- | --------- | ----------- | ------------------------------------------------------------ |
-| `livepulse_db_operation_duration_seconds`   | Histogram | `operation` | PostgreSQL-backed path duration                              |
-| `livepulse_db_operation_errors_total`       | Counter   | `operation` | failures by operation (currently `session.join`, `quiz.answer`) |
+| Metric                                    | Type      | Labels      | Purpose                                                         |
+| ----------------------------------------- | --------- | ----------- | --------------------------------------------------------------- |
+| `livepulse_db_operation_duration_seconds` | Histogram | `operation` | PostgreSQL-backed path duration                                 |
+| `livepulse_db_operation_errors_total`     | Counter   | `operation` | failures by operation (currently `session.join`, `quiz.answer`) |
 
 `operation` values are fixed in code (`session.join`, `quiz.answer`), not
 derived from user input.
 
 ### Quiz
 
-| Metric                                   | Type      | Labels  | Purpose                                                       |
-| ---------------------------------------- | --------- | ------- | ------------------------------------------------------------- |
-| `livepulse_quiz_answers_total`           | Counter   | `result`| `accepted` (incl. winner) / `duplicate` / `rejected`          |
-| `livepulse_quiz_answer_duration_seconds` | Histogram | –       | submission + election duration (the Phase 3 critical section)  |
-| `livepulse_quiz_transitions_total`       | Counter   | `event` | `quiz.start` / `question.publish` / `question.close`           |
+| Metric                                   | Type      | Labels   | Purpose                                                       |
+| ---------------------------------------- | --------- | -------- | ------------------------------------------------------------- |
+| `livepulse_quiz_answers_total`           | Counter   | `result` | `accepted` (incl. winner) / `duplicate` / `rejected`          |
+| `livepulse_quiz_answer_duration_seconds` | Histogram | –        | submission + election duration (the Phase 3 critical section) |
+| `livepulse_quiz_transitions_total`       | Counter   | `event`  | `quiz.start` / `question.publish` / `question.close`          |
 
 ### Doubt queue (ADR-007)
 
-| Metric                                        | Type      | Labels      | Purpose                                             |
-| --------------------------------------------- | --------- | ----------- | --------------------------------------------------- |
-| `livepulse_doubt_created_total`               | Counter   | `result`    | `created` / `duplicate` (idempotent retry)          |
-| `livepulse_doubt_transitions_total`           | Counter   | `status`    | `RESOLVED` / `DISMISSED`                            |
-| `livepulse_doubt_operation_duration_seconds`  | Histogram | `operation` | `create` / `resolve` / `dismiss`                    |
+| Metric                                       | Type      | Labels      | Purpose                                    |
+| -------------------------------------------- | --------- | ----------- | ------------------------------------------ |
+| `livepulse_doubt_created_total`              | Counter   | `result`    | `created` / `duplicate` (idempotent retry) |
+| `livepulse_doubt_transitions_total`          | Counter   | `status`    | `RESOLVED` / `DISMISSED`                   |
+| `livepulse_doubt_operation_duration_seconds` | Histogram | `operation` | `create` / `resolve` / `dismiss`           |
 
 ### Recovery (ADR-006)
 
@@ -180,15 +180,15 @@ sizes (e.g. `ws_protocol_errors_total` has one series per protocol error code).
 
 Existing Pino usage is standardized rather than rebuilt. Every line carries:
 
-| Field                                          | When                                                         |
-| ---------------------------------------------- | ------------------------------------------------------------ |
-| `instanceId`                                   | always (logger `base` — attributes multi-instance logs)      |
-| `event` / `operation`                          | handler and lifecycle lines                                  |
-| `sessionId`, `participantId`                   | where the operation is bound to one (business ids in **logs** only) |
-| `eventId`, `originInstanceId`                  | Redis distribution lines (correlate a notice across instances) |
-| `requestId`                                    | protocol-error and internal-error lines                      |
-| `result`, `reason`, `code`, `status`           | where a line reports an outcome                              |
-| `durationMs`-style values                      | where a duration is logged (not a metric label)              |
+| Field                                | When                                                                |
+| ------------------------------------ | ------------------------------------------------------------------- |
+| `instanceId`                         | always (logger `base` — attributes multi-instance logs)             |
+| `event` / `operation`                | handler and lifecycle lines                                         |
+| `sessionId`, `participantId`         | where the operation is bound to one (business ids in **logs** only) |
+| `eventId`, `originInstanceId`        | Redis distribution lines (correlate a notice across instances)      |
+| `requestId`                          | protocol-error and internal-error lines                             |
+| `result`, `reason`, `code`, `status` | where a line reports an outcome                                     |
+| `durationMs`-style values            | where a duration is logged (not a metric label)                     |
 
 **Never logged:** answer content or any submitted content, `correctAnswer`,
 credentials/tokens, `DATABASE_URL` / `REDIS_URL` or any connection string, raw

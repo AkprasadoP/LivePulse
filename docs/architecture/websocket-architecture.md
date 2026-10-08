@@ -21,7 +21,7 @@ There is exactly ONE application instance.
           │  HTTP routes    │  /health, /sessions, /quizzes, GET /ws (426)
           │       +         │
           │   WS server     │  upgrade routing on the SAME HTTP server
-          │                 │  Phase 3: session.join (identity seam), quiz.start,
+          │                 │  auth.authenticate + session.join (Phase 10.7), quiz.start,
           │                 │  question.publish/close, quiz.answer + broadcasts
           └────────┬────────┘
                    │
@@ -105,7 +105,8 @@ Failure handling rules:
 The registry is deliberately ephemeral: it maps `sessionId → Set<Connection>`
 so the server can deliver frames to everyone watching a session. It holds **no
 business data**, is keyed by connection, and a restart simply means every
-client re-joins (a re-join re-binds the participant via the identity seam).
+client re-joins (a re-join re-binds the participant for the authenticated
+user by `(sessionId, userId)`).
 PostgreSQL is written by the WebSocket layer in exactly one place — the
 answer submission transaction (ADR-004) — and read everywhere else; session,
 quiz and question state machines are never duplicated in memory.
@@ -139,21 +140,21 @@ application-level reconnect/recovery — that is handled at the join layer
   cannot churn the registry.
 - `session.leave` detaches from the registry **and the participant binding**
   (it is session-scoped) but keeps the socket open.
-- Connections are NOT deduplicated: two sockets that join with the same
-  displayName resolve to the SAME participant row but remain two independent
-  registry entries. Deduplication by _user_ is deferred until authentication
-  exists (deliberate, documented behavior).
+- Connections are NOT deduplicated: two sockets bound to the same
+  authenticated user resolve to the SAME participant row but remain two
+  independent registry entries (deliberate, documented behavior).
 
 ## 6a. Participant binding and broadcasts (Phase 3)
 
-**Identity seam.** `session.join` with
-`participant: { displayName }` resolves (find-or-create, race-safe via the
-`users.displayName` unique constraint) a global user and a
-`session_participants` row; the connection stores `{participantId, role,
-displayName}`. The role is `TEACHER` when the displayName equals the
-session creator's, else `STUDENT`. Joining without `participant` stays
-view-only. The seam is explicitly temporary — it is the only code the
-future JWT phase replaces.
+**Identity (Phase 10.7).** The connection first binds an authenticated user
+via `auth.authenticate` (access-token verified server-side). `session.join`
+then resolves (find-or-create, race-safe via the `(sessionId, userId)` unique
+constraint) a `session_participants` row for that user; the connection stores
+`{participantId, role, displayName}` read from the database. The role is
+`TEACHER` for the session creator, else `STUDENT`. Joining without
+authentication stays view-only and binds no participant. `session.join`
+rejects any client-supplied `participant`/`userId`/`participantId`/`role`
+field — there is no displayName identity path.
 
 **Teacher + answer events.** `quiz.start`, `question.publish` and
 `question.close` are TEACHER-guarded, validate against PostgreSQL (session

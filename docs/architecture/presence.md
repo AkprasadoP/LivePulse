@@ -26,15 +26,15 @@ not a durable roster.
 
 Consequences of that wording:
 
-| Case                                                    | Presence                                                                  |
-| ------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Connection joined with `participant.displayName`        | online (immediately after the join ack)                                   |
-| Connection joined without a participant (view-only)     | **not** presence — presence is about participants, not sockets            |
-| Connection that has never answered a ping              | online (liveness is decided by the sweep, not by a successful pong yet)   |
-| Connection terminated by the heartbeat sweep            | offline, as soon as its socket close is processed                         |
-| Participant with phone on WS-A and laptop on WS-B       | online, from both instances' contributions                                |
-| Participant with two connections, one closed            | **still online** (see §4)                                                  |
-| Instance process killed                                 | its participants expire after `3 × PRESENCE_DIGEST_INTERVAL_MS` (§6)      |
+| Case                                                | Presence                                                                |
+| --------------------------------------------------- | ----------------------------------------------------------------------- |
+| Authenticated connection joined (participant bound) | online (immediately after the join ack)                                 |
+| Connection joined without a participant (view-only) | **not** presence — presence is about participants, not sockets          |
+| Connection that has never answered a ping           | online (liveness is decided by the sweep, not by a successful pong yet) |
+| Connection terminated by the heartbeat sweep        | offline, as soon as its socket close is processed                       |
+| Participant with phone on WS-A and laptop on WS-B   | online, from both instances' contributions                              |
+| Participant with two connections, one closed        | **still online** (see §4)                                               |
+| Instance process killed                             | its participants expire after `3 × PRESENCE_DIGEST_INTERVAL_MS` (§6)    |
 
 There is **no** application-level heartbeat. `presence.heartbeat` does not
 exist: the WS ping/pong sweep that already detects dead connections is the only
@@ -59,7 +59,7 @@ PresenceTracker
 `localParticipants` walks live connections and deduplicates by
 `participantId`, so two sockets from one participant produce **one** entry.
 Nothing is cached, so there is no window in which the registry and presence can
-disagree: a half-completed lifecycle leaves the *next* read correct rather than
+disagree: a half-completed lifecycle leaves the _next_ read correct rather than
 leaving stale presence behind.
 
 Lifecycle points that refresh presence (in this order — registry first,
@@ -84,7 +84,7 @@ digest tick   → republish local set → expire silent peers → refresh affect
 - Closing one connection does not produce an offline transition and no
   `presence.snapshot` is emitted that omits them, because the derived set is
   unchanged.
-- Only the *final* connection closing emits a changed snapshot.
+- Only the _final_ connection closing emits a changed snapshot.
 - This is enforced by construction (sets, not counters of sockets) and
   asserted in tests P5 and P7, including the metric-level assertion that no
   `offline` transition is recorded.
@@ -129,7 +129,7 @@ every digest interval:
   the next notice or digest overwrites the contribution.
 - A **crashed or partitioned instance** is indistinguishable from a silent one:
   its participants disappear after the staleness window (30 s at default).
-- A peer that keeps sending digests for *any* session stays fresh; freshness is
+- A peer that keeps sending digests for _any_ session stays fresh; freshness is
   per instance, not per session.
 
 ## 7. Client contract
@@ -142,10 +142,8 @@ every digest interval:
   "requestId": null,
   "payload": {
     "sessionId": "018f…",
-    "participants": [
-      { "participantId": "018f…", "displayName": "Ada", "role": "TEACHER" }
-    ]
-  }
+    "participants": [{ "participantId": "018f…", "displayName": "Ada", "role": "TEACHER" }],
+  },
 }
 ```
 
@@ -196,21 +194,21 @@ client therefore ends up with:
   online; presence is eventually consistent, with a bounded staleness window.
 - **Not durable.** A process restart loses all presence; nothing is replayed.
 - **Not a roster.** Presence ≠ registered participants ≠ attendance.
-- **Not identity.** Presence reports the participant bound via the displayName
-  seam; it inherits the Phase 3 limitation that a display name is not a
-  credential, so a name is not proof of a person.
+- **Not identity.** Presence reports the participant bound by the
+  authenticated `(sessionId, userId)` membership. `displayName` is a
+  presentation label, never proof of a person.
 - **No per-participant join/leave events** and no presence history.
 - **No delivery guarantee** for `presence.snapshot` — consistent with Phase 5,
   a missed snapshot is corrected by the next change or digest.
 
 ## 9. Redis failure behavior
 
-| Situation                        | Local presence                          | Cross-instance presence                                   | Durable work                       |
-| -------------------------------- | --------------------------------------- | --------------------------------------------------------- | ---------------------------------- |
-| Redis unreachable / distribution off | exact and immediate                 | degraded: nothing propagates; peers rely on staleness      | unaffected                         |
-| Redis recovers                   | unaffected                              | resumes at the next local change or digest                 | unaffected                         |
-| Redis drops a notice             | unaffected                              | stale until the next notice/digest (self-healing)          | unaffected                         |
-| Redis unavailable at shutdown    | unaffected                              | peers expire the instance after `3 × digest`               | unaffected                         |
+| Situation                            | Local presence      | Cross-instance presence                               | Durable work |
+| ------------------------------------ | ------------------- | ----------------------------------------------------- | ------------ |
+| Redis unreachable / distribution off | exact and immediate | degraded: nothing propagates; peers rely on staleness | unaffected   |
+| Redis recovers                       | unaffected          | resumes at the next local change or digest            | unaffected   |
+| Redis drops a notice                 | unaffected          | stale until the next notice/digest (self-healing)     | unaffected   |
+| Redis unavailable at shutdown        | unaffected          | peers expire the instance after `3 × digest`          | unaffected   |
 
 Redis is never consulted to answer "who is online", so a Redis outage cannot
 make presence incorrect on the instance that owns the connection — only

@@ -7,8 +7,8 @@
 //
 // Baseline goals:
 //   - POST /sessions creates a real session with a unique name per VU/iter
-//   - each VU uses a distinct creator.displayName so the auto-provisioned
-//     creator row does not collide on the unique displayName constraint
+//   - a creator is registered once in setup(); every request carries that
+//     bearer token (Phase 10.7: POST /sessions requires authentication)
 //   - record status-code distribution, request count, failures, and latency
 //
 // Not a capacity claim: in 8.1 we only validate that the instrumented stack
@@ -27,9 +27,7 @@ export const httpFailures = new Counter("http_failures");
 // Warm-up: 10 VUs, 30 seconds. The goal is to **validate the instrumented
 // stack**, not to size a system under load.
 export const options = {
-  stages: [
-    { duration: "30s", target: 10 },
-  ],
+  stages: [{ duration: "30s", target: 10 }],
   thresholds: {
     // No performance targets — these are recorded, not asserted.
     http_duration_ms: ["p(95)<1000"], // provisional only; replaced by measured data in 8.2
@@ -38,36 +36,40 @@ export const options = {
 
 const BASE_URL = __ENV.BASE_URL || "http://127.0.0.1:3000";
 
-// Keep every VU/iter distinct so the smoke exercises the happy path, not the
-// unique-creator collision path. The harness/Node fallback does not have k6's
-// __VU/__ITER, so the Node runner synthesizes its own per-VU identity and a
-// per-request monotonic id; both must be unique per request.
+// Keep every VU/iter distinct so the smoke exercises the happy path.
 export function generateSessionName(vu, iter) {
   return `e2e-sesh-${vu}-${iter}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
-export function generateCreatorDisplayName(vu) {
-  // Unique per VU and per scenario run so concurrent VUs do not collide on
-  // the users.displayName unique constraint (P2002 -> 409).
-  return `smoke-creator-VU-${vu}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+// Phase 10.7: POST /sessions requires authentication. Register ONE creator in
+// setup() (k6 runs setup once per test) and reuse its access token for every
+// VU — sessions stay distinct; the creator identity is authenticated, never a
+// client-supplied displayName.
+export function setup() {
+  const email = `load-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
+  const displayName = `load-creator-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const res = http.post(
+    `${BASE_URL}/auth/register`,
+    JSON.stringify({ email, password: "load-test-pw-12", displayName }),
+    { headers: { "content-type": "application/json" } },
+  );
+  check(res, { "creator registered (201)": (r) => r.status === 201 });
+  return { accessToken: res.json("accessToken") };
 }
 
-export default function (vu, iter) {
-  const sessionName = generateSessionName(vu, iter);
-  const creatorDisplayName = generateCreatorDisplayName(vu);
+export default function (data) {
+  const sessionName = generateSessionName(__VU, __ITER);
 
   const url = new URL(BASE_URL);
   url.pathname = "/sessions";
   url.searchParams.set("name", sessionName);
 
-  const res = http.request(
-    "POST",
-    url.toString(),
-    JSON.stringify({ name: sessionName, creator: { displayName: creatorDisplayName } }),
-    {
-      headers: { "content-type": "application/json" },
+  const res = http.request("POST", url.toString(), JSON.stringify({ name: sessionName }), {
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${data.accessToken}`,
     },
-  );
+  });
 
   httpRequests.add(1);
   httpStatuses.add(res.status);

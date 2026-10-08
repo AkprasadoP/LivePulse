@@ -45,20 +45,3 @@ export function createAuthenticatePreHandler(tokens: TokenService) {
     request.user = { id: verified.userId };
   };
 }
-
-/**
- * Phase 10.6 optional authentication for routes mid-migration: no header →
- * anonymous (legacy behavior preserved); present header → MUST verify (a bad
- * token is 401, never a silent downgrade to anonymous — that would hide
- * attacks and make failures untestable).
- */
-export function createOptionalAuthenticatePreHandler(tokens: TokenService) {
-  const strict = createAuthenticatePreHandler(tokens);
-  return async function tryAuthenticateRequest(
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ): Promise<void> {
-    if (request.headers.authorization === undefined) return;
-    await strict(request, reply);
-  };
-}

@@ -52,8 +52,9 @@ frames after an event, which no positive signal can terminate early.
   resubmission replays it (`answer.accepted` with the same verdict) without
   a second broadcast.
 - **R7 — duplicate submission after reconnect.** Two connections bound to
-  the same displayName; the duplicate socket's answer is an idempotent
-  replay; `answers` count stays 1 and the winner count stays 1 (DB-level).
+  the same authenticated user; the duplicate socket's answer is an
+  idempotent replay; `answers` count stays 1 and the winner count stays 1
+  (DB-level).
 - **R8 — multiple missed events.** Quiz started, question published,
   question closed, leaderboard accumulated — all while disconnected. One
   rejoin returns all of it: quiz `ACTIVE`, question `CLOSED`, standings
@@ -97,5 +98,5 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/rec
 - Violent `SIGKILL` of an instance process (Phase 11 failure drills; here a
   graceful stop exercises the same recovery path).
 - Load-scale reconnect storms (Phase 10, k6).
-- Person-level identity continuity — impossible with the displayName seam;
-  see `docs/architecture/recovery.md` §5 for the documented limitation.
+- **Record continuity is keyed by the authenticated userId** — see
+  `docs/architecture/recovery.md` §5.

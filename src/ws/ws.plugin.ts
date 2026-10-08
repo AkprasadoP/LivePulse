@@ -7,7 +7,6 @@ import type { Connection } from "./connection.js";
 import { SessionRepository } from "../modules/sessions/session.repository.js";
 import { QuizRepository } from "../modules/quizzes/quiz.repository.js";
 import { AnswerRepository } from "../modules/answers/answer.repository.js";
-import { UserRepository } from "../modules/users/user.repository.js";
 import { ParticipantRepository } from "../modules/participants/participant.repository.js";
 import { DoubtRepository } from "../modules/doubts/doubt.repository.js";
 import { TokenService } from "../modules/auth/token.service.js";
@@ -111,10 +110,7 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
   const sessionRepository = new SessionRepository(app.prisma);
   const quizRepository = new QuizRepository(app.prisma);
   const answerRepository = new AnswerRepository(app.prisma);
-  const participantRepository = new ParticipantRepository(
-    app.prisma,
-    new UserRepository(app.prisma),
-  );
+  const participantRepository = new ParticipantRepository(app.prisma);
   const doubtRepository = new DoubtRepository(app.prisma);
 
   const wss = new WebSocketServer({

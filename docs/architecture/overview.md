@@ -27,7 +27,7 @@ Fastify server (TypeScript, ESM)
    ├── GET  /quizzes/:quizId               → quiz + questions (answers hidden)
    ├── GET  /ws (plain HTTP)               → 426 Upgrade Required
    ├── WebSocket upgrade /ws               → raw `ws`, upgrade-routed on the SAME HTTP server
-   │     session.join (+ optional participant identity seam) / session.leave
+   │     auth.authenticate + session.join (identity from the token) / session.leave
    │       → session.joined carries the Phase 5 recovery snapshot (ADR-006):
    │         quizzes/question/ownAnswer/standings read from PostgreSQL —
    │         convergence on reconnect, NOT event replay
@@ -89,7 +89,7 @@ multi-instance compose** — that arrives in Phase 6.
 | WS integration tests over real sockets                | ✅     | 45 tests: lifecycle, protocol, session behavior, heartbeat, shutdown                    |
 | Integration tests vs real PostgreSQL                  | ✅     | 91 total incl. WS + distribution (API flows, DB constraints, quiz flow, races)          |
 | Quiz/question lifecycle transitions (WS, teacher)     | ✅     | `quiz.start` / `question.publish` / `question.close`; one-open-question DB index        |
-| Identity seam (displayName → user + participant)      | ✅     | Phase 3, temporary until auth; unique displayName, race-safe find-or-create             |
+| Authenticated identity (token → user → participant)   | ✅     | Phase 10.7: participant resolved by `(sessionId, userId)`; displayName is presentation  |
 | Answer submission + first-correct-wins election       | ✅     | ADR-004: FOR NO KEY UPDATE + partial unique index; duplicates replay verdicts           |
 | Leaderboard (per question, derived from answers)      | ✅     | `leaderboard.updated` broadcasts; no ranking state cached                               |
 | Concurrency tests (10/50/100 + mixed races)           | ✅     | exactly one winner on every run — `docs/testing/concurrency.md`                         |
@@ -117,9 +117,9 @@ src/
 │   ├── sessions/…            repository, state machine, schemas, routes   (Phase 1)
 │   ├── quizzes/…             repository, CAS state transitions, schemas   (Phases 1+3)
 │   ├── answers/…             AnswerRepository: atomic election transaction (Phase 3)
-│   ├── participants/…        ParticipantRepository: find-or-create seam   (Phase 3)
+│   ├── participants/…        ParticipantRepository: find-or-create by (sessionId,userId) (Phase 10.7)
 │   ├── doubts/…              DoubtRepository: transactional queue accept + transitions (Phase 6)
-│   ├── users/…               UserRepository: find-or-create by displayName (Phase 3)
+│   ├── users/…               UserRepository: user rows (created at auth registration)
 │   └── index.ts
 ├── ws/                                                            (Phases 2+3)
 │   ├── ws.plugin.ts          attach(): upgrade routing, lifecycle, heartbeat, shutdown
@@ -170,16 +170,18 @@ load-tests/                   (empty until Phase 10)
   time (ADR-004, protocol doc §7).
 - **Connection state is ephemeral and connection-keyed** (ADR-003): at most
   one session per connection; join-switch = leave-then-join; duplicate joins
-  refused; same-identity sockets are not deduplicated (no auth yet).
+  refused; two sockets bound to the same authenticated user are not
+  deduplicated (deliberate behavior).
 - **Liveness is protocol-level ping/pong** with a one-interval grace, then
   terminate (ADR-003).
 - **Shutdown ordering:** Fastify `preClose` closes all sockets (1001) before
   `server.close()` — otherwise upgraded sockets deadlock the close (covered
   by a dedicated test).
 - **Identity:** global `users` vs session-scoped `session_participants`
-  (role on the participant). Phase 3 development seam: `session.join` binds a
-  participant by unique displayName (find-or-create, race-safe); explicitly
-  temporary until JWT auth — the seam is one replaceable code path.
+  (role on the participant). Phase 10.7: `session.join` binds the participant
+  for the connection's authenticated `userId` (find-or-create on
+  `(sessionId, userId)`); role and displayName come from the database. No
+  client-supplied identity; `displayName` is presentation only.
 - **REST vs WS split:** HTTP owns durable/curatorial control-plane operations
   (create session/quiz, move session state); WS owns real-time classroom
   events (quiz start, publish/close, answers, broadcasts) because their

@@ -8,6 +8,7 @@ import {
   startIndependentInstance,
   connectToInstance,
   joinAs,
+  registerAndCreateSession,
   waitFor,
   waitForAsync,
   waitForPresence,
@@ -68,12 +69,11 @@ function requestOn(instance: IndependentInstance) {
 /** A LIVE session (presence only needs a real session row). */
 async function createLiveSession(instance: IndependentInstance): Promise<string> {
   const request = requestOn(instance);
-  const created = await request("POST", "/sessions", {
-    name: `Presence ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-  });
-  expect(created.statusCode).toBe(201);
-  const sessionId = created.body.session.id as string;
+  // Phase 10.7: creation requires an authenticated owner (token subject).
+  const { sessionId } = await registerAndCreateSession(
+    instance.app,
+    `Presence ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  );
   const live = await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
   expect(live.statusCode).toBe(200);
   return sessionId;
@@ -90,7 +90,9 @@ async function counterFor(instance: IndependentInstance, series: string): Promis
 
 /** Publish a raw distribution envelope (used to fake a crashed peer). */
 async function publishRaw(envelope: Record<string, unknown>): Promise<void> {
-  const client = createClient({ url: process.env.LIVEPULSE_TEST_REDIS_URL ?? "redis://localhost:6380" });
+  const client = createClient({
+    url: process.env.LIVEPULSE_TEST_REDIS_URL ?? "redis://localhost:6380",
+  });
   await client.connect();
   try {
     await client.publish("livepulse:events", JSON.stringify(envelope));
@@ -126,10 +128,8 @@ describe("Presence (integration, Phase 7)", () => {
     const student = await connectToInstance(wsA);
     const joined = await joinAs(student, sessionId, "Student-1");
 
-    const participantIds = await waitForPresence(
-      student,
-      sessionId,
-      (ids) => ids.includes(joined.participantId!),
+    const participantIds = await waitForPresence(student, sessionId, (ids) =>
+      ids.includes(joined.participantId!),
     );
     expect(participantIds).toEqual([joined.participantId]);
 
@@ -312,7 +312,9 @@ describe("Presence (integration, Phase 7)", () => {
 
     const reconnecting = await connectToInstance(wsB);
     const first = await joinAs(reconnecting, sessionId, "Roamer");
-    await waitForPresence(reconnecting, sessionId, (ids) => ids.includes(residentJoined.participantId!));
+    await waitForPresence(reconnecting, sessionId, (ids) =>
+      ids.includes(residentJoined.participantId!),
+    );
     await reconnecting.destroy();
 
     // A NEW connection (fresh instance, same identity) reconciles from the
@@ -382,7 +384,9 @@ describe("Presence (integration, Phase 7)", () => {
       payload: {
         sessionId,
         seq: 1,
-        participants: [{ participantId: ghostParticipantId, displayName: "Ghost", role: "STUDENT" }],
+        participants: [
+          { participantId: ghostParticipantId, displayName: "Ghost", role: "STUDENT" },
+        ],
       },
     });
 
@@ -443,19 +447,23 @@ describe("Presence (integration, Phase 7)", () => {
 
       const frozen = await connectToInstance(pulse);
       const frozenJoined = await joinAs(frozen, sessionId, "Frozen");
-      await waitForPresence(observer, sessionId, (ids) => ids.includes(frozenJoined.participantId!));
+      await waitForPresence(observer, sessionId, (ids) =>
+        ids.includes(frozenJoined.participantId!),
+      );
 
       // Stop reading: the server's pings are never answered, so the existing
       // heartbeat sweep declares this connection dead (no cooperative close).
       frozen.freeze();
 
-      await waitFor(
-        () => pulse.app.wsLayer?.registry.countForSession(sessionId) === 1,
-        10_000,
-        50,
+      await waitFor(() => pulse.app.wsLayer?.registry.countForSession(sessionId) === 1, 10_000, 50);
+      await waitForPresence(
+        observer,
+        sessionId,
+        (ids) => !ids.includes(frozenJoined.participantId!),
       );
-      await waitForPresence(observer, sessionId, (ids) => !ids.includes(frozenJoined.participantId!));
-      expect(await counterFor(pulse, 'livepulse_ws_connections_closed_total{reason="heartbeat"}')).toBe(1);
+      expect(
+        await counterFor(pulse, 'livepulse_ws_connections_closed_total{reason="heartbeat"}'),
+      ).toBe(1);
 
       frozen.resume();
       frozen.destroy().catch(() => {});

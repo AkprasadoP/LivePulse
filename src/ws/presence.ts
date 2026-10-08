@@ -44,7 +44,9 @@ export interface PresenceTrackerOptions {
 }
 
 function compareParticipants(a: ParticipantView, b: ParticipantView): number {
-  return a.displayName.localeCompare(b.displayName) || a.participantId.localeCompare(b.participantId);
+  return (
+    a.displayName.localeCompare(b.displayName) || a.participantId.localeCompare(b.participantId)
+  );
 }
 
 export class PresenceTracker {
@@ -134,7 +136,8 @@ export class PresenceTracker {
    */
   public aggregate(sessionId: string): ParticipantView[] {
     const byParticipant = new Map<string, ParticipantView>();
-    for (const view of this.localParticipants(sessionId)) byParticipant.set(view.participantId, view);
+    for (const view of this.localParticipants(sessionId))
+      byParticipant.set(view.participantId, view);
     for (const contribution of this.remote.values()) {
       const session = contribution.sessions.get(sessionId);
       if (!session) continue;

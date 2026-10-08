@@ -16,10 +16,10 @@ export interface Connection {
    */
   joinedSessionId: string | null;
   /**
-   * Participant bound at session.join time via the development identity seam
-   * (Phase 3). Session-scoped: cleared when the connection leaves the
-   * session. NOT authentication — see docs/decisions/002 and the Phase 3
-   * identity-seam section of the protocol doc.
+   * Participant bound at session.join time (Phase 10.7): resolved
+   * server-side from the authenticated userId via (sessionId, userId).
+   * Session-scoped: cleared when the connection leaves the session. Null for
+   * view-only joins (a connection that joined without authenticating).
    */
   participantId: string | null;
   participantRole: "TEACHER" | "STUDENT" | null;
@@ -27,10 +27,11 @@ export interface Connection {
    * Phase 10.5: authenticated user bound by `auth.authenticate` (access
    * token verified server-side). Connection-scoped, NOT session-scoped:
    * survives session.leave; cleared only when the socket closes. Null until
-   * the client authenticates — unauthenticated connections keep the legacy
-   * displayName join path. Never set from client-supplied IDs.
+   * the client authenticates — an unauthenticated join is view-only and
+   * binds no participant. Never set from client-supplied IDs.
    */
   userId: string | null;
+  /** Presentation label of the bound participant (from the DB user row). */
   displayName: string | null;
   /**
    * Heartbeat liveness flag. Server sets true on every interval tick and

@@ -20,10 +20,11 @@ it):
   7-entity PostgreSQL domain schema, the race-safe session state machine,
   the session/quiz REST API, and the raw-`ws` WebSocket layer (shared port,
   envelope protocol, ephemeral registry, heartbeat, `preClose` shutdown)
-- A temporary development identity seam: `session.join` binds a real user +
-  `session_participants` row by globally-unique `displayName`
-  (find-or-create, race-safe); view-only joins still supported. Replaced by
-  authentication in a later phase — the seam is one replaceable code path
+- Authenticated identity (Phase 10.7): `session.join` binds a
+  `session_participants` row for the authenticated user, resolved server-side
+  by `(sessionId, userId)` (find-or-create, race-safe); `displayName` is
+  presentation only. Unauthenticated joins are view-only. The Phase 3
+  displayName identity seam is removed
 - Quiz/question lifecycles driven over WebSocket (teacher-only):
   `quiz.start` (DRAFT→ACTIVE), `question.publish` (DRAFT→PUBLISHED),
   `question.close` (PUBLISHED→CLOSED), with broadcasts; at most one

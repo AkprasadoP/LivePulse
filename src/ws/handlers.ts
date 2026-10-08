@@ -220,13 +220,12 @@ export async function handleClientEnvelope(
       return;
     }
   }
-  // ...and teacher events additionally need the TEACHER role.
-  // Phase 10.6 ownership: for AUTHENTICATED connections, authority derives
-  // from userId → session creator, never from displayName. The bound
-  // participant's user must own the joined session. Unauthenticated
-  // connections keep the legacy role check (removed in 10.7). Today both
-  // formulations coincide (only creators hold TEACHER), so this is
-  // structural now and load-bearing once legacy binding is gone.
+  // ...and teacher events additionally need TEACHER authority.
+  // Phase 10.7: only authenticated connections bind a participant (view-only
+  // joins never reach here — the participant guard above refuses them), and
+  // authority derives from userId → session creator, never from displayName.
+  // The DB role gate and the ownership gate are both enforced; only the
+  // session creator holds TEACHER today, so they coincide.
   const teacherEvents = [
     "quiz.start",
     "question.publish",
@@ -260,7 +259,7 @@ export async function handleClientEnvelope(
     // The dispatch table shares one payload type; each event's schema already
     // validated its own payload, so the per-case cast is safe.
     const payload = payloadResult.data as
-      | { sessionId: string; participant?: { displayName: string } }
+      | { sessionId: string }
       | { token: string }
       | { quizId: string }
       | { questionId: string }
@@ -273,12 +272,7 @@ export async function handleClientEnvelope(
         await handleAuthAuthenticate(connection, payload as { token: string }, requestId, deps);
         return;
       case "session.join":
-        await handleSessionJoin(
-          connection,
-          payload as { sessionId: string; participant?: { displayName: string } },
-          requestId,
-          deps,
-        );
+        await handleSessionJoin(connection, payload as { sessionId: string }, requestId, deps);
         return;
       case "session.leave":
         handleSessionLeave(connection, requestId, deps);
@@ -424,7 +418,7 @@ async function handleAuthAuthenticate(
 
 async function handleSessionJoin(
   connection: Connection,
-  payload: { sessionId: string; participant?: { displayName: string } },
+  payload: { sessionId: string },
   requestId: string,
   deps: HandlerDependencies,
 ): Promise<void> {
@@ -453,12 +447,13 @@ async function handleSessionJoin(
     return;
   }
 
-  // Identity resolution (Phase 10.5 precedence): an AUTHENTICATED connection
-  // is bound purely server-side — participant by (sessionId, userId), role
-  // and displayName from the database rows. Any client-supplied identity
-  // (known-field displayName or unknown userId/participantId/role, the latter
-  // already rejected by the strict schema) is ignored, never authoritative.
-  // Unauthenticated connections keep the legacy displayName path unchanged.
+  // Identity resolution (Phase 10.7): ONLY authenticated connections bind
+  // a participant, resolved server-side by (sessionId, userId). A join
+  // WITHOUT authentication is view-only by design: it joins the session
+  // (receives broadcasts, may list doubts) but binds NO participant, so no
+  // displayName — supplied or otherwise — can ever become identity again.
+  // The legacy displayName-binding path is gone; displayName survives solely
+  // as presentation data read back from the database.
   let participant: { id: string; role: "TEACHER" | "STUDENT"; displayName: string } | null = null;
   if (connection.userId !== null) {
     deps.registry.leaveSession(connection);
@@ -475,21 +470,8 @@ async function handleSessionJoin(
       role: found.participant.role,
       displayName: user.displayName,
     };
-  } else if (payload.participant) {
-    deps.registry.leaveSession(connection);
-    const found = await deps.participantRepository.findOrCreate(
-      payload.sessionId,
-      payload.participant.displayName,
-    );
-    connection.participantId = found.participant.id;
-    connection.participantRole = found.participant.role;
-    connection.displayName = payload.participant.displayName;
-    participant = {
-      id: found.participant.id,
-      role: found.participant.role,
-      displayName: payload.participant.displayName,
-    };
   } else {
+    // View-only: join the session for broadcasts, bind nothing.
     deps.registry.leaveSession(connection);
   }
 

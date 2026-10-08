@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Writable } from "node:stream";
 import { PrismaClient } from "@prisma/client";
 import {
@@ -9,6 +9,7 @@ import {
   stopTestApp,
   connectToInstance,
   joinAs,
+  registerAndCreateSession,
   waitFor,
   type IndependentInstance,
 } from "./helpers.js";
@@ -47,7 +48,10 @@ class CapturingStream extends Writable {
     callback();
   }
   public lines(): string[] {
-    return this.chunks.join("").split("\n").filter((line) => line.trim() !== "");
+    return this.chunks
+      .join("")
+      .split("\n")
+      .filter((line) => line.trim() !== "");
   }
 }
 
@@ -91,15 +95,13 @@ async function scrape(instance: IndependentInstance): Promise<string> {
 async function makeScenario(instance: IndependentInstance) {
   const request = requestOn(instance);
   const correctAnswer = "correct-horse-battery-staple";
-  const created = await request("POST", "/sessions", {
-    name: `Observability ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-  });
-  expect(created.statusCode).toBe(201);
-  const sessionId = created.body.session.id as string;
-  // Joining with the CREATOR's display name binds to the TEACHER participant
-  // row (the Phase 3 identity seam); a fresh name would be a STUDENT.
-  const teacherDisplayName = created.body.session.creator.displayName as string;
+  // Phase 10.7: creation requires an authenticated owner. Joining with the
+  // registered creator's display name resolves the TEACHER participant; a
+  // fresh name would be a STUDENT.
+  const { sessionId, creatorDisplayName: teacherDisplayName } = await registerAndCreateSession(
+    instance.app,
+    `Observability ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  );
 
   const quizResponse = await request("POST", `/sessions/${sessionId}/quizzes`, {
     title: "Observability quiz",
@@ -131,6 +133,13 @@ describe("Observability (integration, Phase 7)", () => {
   afterAll(async () => {
     await stopTestApp();
     await prisma.$disconnect();
+  });
+
+  // Phase 10.7: identity is registered, so users must be unique per test.
+  // Residue from an earlier file would 409 a fixed displayName like
+  // "Student-1"; resetting here keeps each observability test self-contained.
+  beforeEach(async () => {
+    await resetDatabase();
   });
 
   it("O1 — GET /metrics returns valid Prometheus text for every installed family", async () => {
@@ -166,20 +175,16 @@ describe("Observability (integration, Phase 7)", () => {
       const client = await connectToInstance(instance);
       let text = await scrape(instance);
       expect(seriesValue(text, "livepulse_ws_connections_active")).toBe(1);
-      expect(
-        seriesValue(text, "livepulse_ws_connections_opened_total"),
-      ).toBe(1);
+      expect(seriesValue(text, "livepulse_ws_connections_opened_total")).toBe(1);
 
       await client.close();
       await waitFor(() => instance.app.wsLayer!.registry.connectionCount === 0);
       text = await scrape(instance);
       expect(seriesValue(text, "livepulse_ws_connections_active")).toBe(0);
-      expect(
-        seriesValue(text, 'livepulse_ws_connections_closed_total{reason="client"}'),
-      ).toBe(1);
-      expect(
-        seriesValue(text, 'livepulse_ws_connections_closed_total{reason="heartbeat"}'),
-      ).toBe(0);
+      expect(seriesValue(text, 'livepulse_ws_connections_closed_total{reason="client"}')).toBe(1);
+      expect(seriesValue(text, 'livepulse_ws_connections_closed_total{reason="heartbeat"}')).toBe(
+        0,
+      );
     } finally {
       await instance.close();
     }
@@ -215,7 +220,10 @@ describe("Observability (integration, Phase 7)", () => {
         seriesValue(text, 'livepulse_ws_handler_duration_seconds_count{event="session.join"}'),
       ).toBe(1);
       expect(
-        seriesValue(text, 'livepulse_db_operation_duration_seconds_count{operation="session.join"}'),
+        seriesValue(
+          text,
+          'livepulse_db_operation_duration_seconds_count{operation="session.join"}',
+        ),
       ).toBe(1);
       // Recovery snapshot build is measured on the same join path.
       expect(seriesValue(text, "livepulse_recovery_duration_seconds_count")).toBe(1);
@@ -288,7 +296,9 @@ describe("Observability (integration, Phase 7)", () => {
 
       const text = await scrape(instance);
       expect(seriesValue(text, 'livepulse_quiz_transitions_total{event="quiz.start"}')).toBe(1);
-      expect(seriesValue(text, 'livepulse_quiz_transitions_total{event="question.publish"}')).toBe(1);
+      expect(seriesValue(text, 'livepulse_quiz_transitions_total{event="question.publish"}')).toBe(
+        1,
+      );
       expect(seriesValue(text, 'livepulse_quiz_answers_total{result="accepted"}')).toBe(1);
       expect(seriesValue(text, "livepulse_quiz_answer_duration_seconds_count")).toBe(1);
       expect(seriesValue(text, 'livepulse_doubt_created_total{result="created"}')).toBe(1);
@@ -314,7 +324,9 @@ describe("Observability (integration, Phase 7)", () => {
       await client.waitFor((m) => m.type === "error" && m.requestId === "e1");
 
       const text = await scrape(instance);
-      expect(seriesValue(text, 'livepulse_ws_protocol_errors_total{code="UNSUPPORTED_EVENT"}')).toBe(1);
+      expect(
+        seriesValue(text, 'livepulse_ws_protocol_errors_total{code="UNSUPPORTED_EVENT"}'),
+      ).toBe(1);
       // The error code label is the ONLY label on that family.
       const series = text
         .split("\n")
@@ -339,7 +351,8 @@ describe("Observability (integration, Phase 7)", () => {
       const text = await scrape(instance);
       const labelPattern = /([a-zA-Z_][a-zA-Z0-9_]*)="/g;
       const seen = new Set<string>();
-      for (const match of text.matchAll(labelPattern)) if (match[1] !== undefined) seen.add(match[1]);
+      for (const match of text.matchAll(labelPattern))
+        if (match[1] !== undefined) seen.add(match[1]);
       const allowed = new Set([
         "code",
         "connection",
@@ -356,8 +369,17 @@ describe("Observability (integration, Phase 7)", () => {
         expect(allowed.has(label), `label "${label}" must be bounded`).toBe(true);
       }
       expect(seen.size).toBeGreaterThanOrEqual(3);
-      for (const forbidden of ["sessionId", "participantId", "doubtId", "questionId", "requestId", "eventId"]) {
-        expect(text.includes(`${forbidden}="`), `${forbidden} must not be a metric label`).toBe(false);
+      for (const forbidden of [
+        "sessionId",
+        "participantId",
+        "doubtId",
+        "questionId",
+        "requestId",
+        "eventId",
+      ]) {
+        expect(text.includes(`${forbidden}="`), `${forbidden} must not be a metric label`).toBe(
+          false,
+        );
       }
       // The concrete ids that flowed through the system are NOT in the output.
       expect(text).not.toContain(scenario.sessionId);

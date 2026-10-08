@@ -76,27 +76,45 @@ correlate their own action; pure server-initiated frames carry `null`.
 5. `requestId` is never used as a database identifier, logged as a session
    ID, or assumed unique across clients.
 
-## 4. Identity seam (Phase 3, temporary)
+## 4. Identity (Phase 10.7: authenticated)
 
-There is no authentication yet. `session.join` accepts an optional
-`participant: { displayName }`:
+Identity comes from authentication, never from the payload. A client binds an
+authenticated user by sending `auth.authenticate` (see §5.1); `session.join`
+then resolves the participant **server-side** by `(sessionId, userId)`:
 
-- **With `participant`** — the server resolves a _stable global user_ by
-  `displayName` (unique on `users.displayName`, find-or-create, race-safe)
-  and binds a _session participant_ (`session_participants`, unique per
-  `(sessionId, userId)`). The role is `TEACHER` when the displayName matches
-  the session creator, otherwise `STUDENT`. The binding is stored on the
-  in-memory connection and answers/teacher actions are attributed to it.
-- **Without `participant`** — view-only join (Phase 2 behavior): the
-  connection joins the registry but cannot answer or run the quiz
-  (`NOT_A_PARTICIPANT`).
+- **Authenticated** — `session.join` finds-or-creates the membership row for
+  the connection's verified `userId`. The role is read from the database
+  (`TEACHER` only for the session creator, `STUDENT` otherwise) and
+  `displayName` is read from the user row. The client cannot supply `userId`,
+  `participantId`, `role`, or `displayName`: `session.join` is a strict
+  object and rejects any such field with `INVALID_REQUEST`.
+- **Unauthenticated** — the join is **view-only**: the connection joins the
+  registry (receives broadcasts, may list doubts) but binds **no** participant
+  and cannot answer or run the quiz (`NOT_A_PARTICIPANT`).
 
-This is an explicitly temporary seam: displayName is a convenient, unique
-label, not a credential. Anyone can claim any name. When JWT/auth lands,
-`session.join` will carry a token and the binding code is the only thing that
-changes; the schema (`users`, `session_participants`) is already auth-shaped.
+`displayName` is presentation data only — a unique label, never a credential,
+never an authority. A connection stays authenticated across `session.leave`
+(the bound `userId` is connection-scoped); it is cleared when the socket
+closes. The Phase 3 `participant: { displayName }` identity seam is **gone**.
 
 ## 5. Client events
+
+### 5.0 `auth.authenticate`
+
+```json
+{ "type": "auth.authenticate", "requestId": "auth-1", "payload": { "token": "<access-token>" } }
+```
+
+| Field   | Rules                |
+| ------- | -------------------- |
+| `token` | string, 1–2048 chars |
+
+Binds the connection to the token's verified subject (`connection.userId`). On
+success the server replies `auth.authenticated` with `{ userId }`. An
+invalid/expired/tampered token yields `UNAUTHENTICATED` and leaves any
+previously bound user untouched (a failed attempt is not a logout). The token
+travels in a frame, never in the upgrade URL. `userId`, `participantId` and
+`role` are not accepted anywhere — the ONLY identity claim is an access token.
 
 ### 5.1 `session.join`
 
@@ -104,29 +122,27 @@ changes; the schema (`users`, `session_participants`) is already auth-shaped.
 {
   "type": "session.join",
   "requestId": "req-123",
-  "payload": {
-    "sessionId": "018f3c2e-...",
-    "participant": { "displayName": "Student-1" }
-  }
+  "payload": { "sessionId": "018f3c2e-..." }
 }
 ```
 
-| Field         | Rules                                            |
-| ------------- | ------------------------------------------------ |
-| `sessionId`   | UUID (format checked before any database access) |
-| `participant` | optional; `displayName` 1–50 chars               |
+| Field       | Rules                                            |
+| ----------- | ------------------------------------------------ |
+| `sessionId` | UUID (format checked before any database access) |
 
 Server behavior, in order:
 
-1. Validate the envelope and payload (Zod).
+1. Validate the envelope and payload (Zod). Any extra identity field
+   (`participant`, `userId`, `participantId`, `role`) → `INVALID_REQUEST`.
 2. Load the session from PostgreSQL (the database is the only source of
    session state). Missing → `error` `SESSION_NOT_FOUND`.
 3. Already joined to **this** session → `error` `SESSION_ALREADY_JOINED`
    (idempotent-refused; no state change).
 4. Joined to a **different** session → deterministic switch: **leave A, then
    join B** (ADR-003).
-5. If `participant` is present, resolve/create user + participant rows
-   (race-safe find-or-create) and bind them to the connection.
+5. If authenticated, resolve-or-create the participant for
+   `(sessionId, connection.userId)` and bind it; role and `displayName` are
+   read from the database. Otherwise bind nothing (view-only).
 6. Register the connection in the in-memory registry.
 7. Build the Phase 5 recovery snapshot from PostgreSQL (see §5.1.1) and send
    `session.joined` — the participant triple (`null` for view-only) **plus
@@ -190,10 +206,10 @@ at all. It is a snapshot of what _is_, never a replay of what _changed_.
   replayed** — the snapshot reconciles the client to current state instead.
 - A snapshot build failure never fails the join: `recovery` degrades to
   `null` (logged server-side) and the connection still joins.
-- Identity is the same development seam as §4: reconnect with the same
-  `displayName` binds to the same participant row, which is what makes
-  `ownAnswer` resolve. `displayName` is not a credential (documented
-  limitation; see `docs/architecture/recovery.md` §5).
+- Identity is authenticated (§4): a reconnecting client authenticates the
+  same user and `session.join` resolves the same participant row by
+  `(sessionId, userId)`, which is what makes `ownAnswer` resolve. View-only
+  joins always have `ownAnswer: null`.
 
 Full design, guarantees and limitations: `docs/architecture/recovery.md`,
 ADR-006; test evidence: `docs/testing/recovery.md`.
@@ -504,7 +520,9 @@ Rules:
 ## 10. Worked example (full live quiz)
 
 ```
-C → S: {"type":"session.join","requestId":"r1","payload":{"sessionId":"018f...","participant":{"displayName":"Ms. Ray"}}}
+C → S: {"type":"auth.authenticate","requestId":"a0","payload":{"token":"<access-token>"}}
+S → C: {"type":"auth.authenticated","requestId":"a0","payload":{"userId":"0188..."}}
+C → S: {"type":"session.join","requestId":"r1","payload":{"sessionId":"018f..."}}
 S → C: {"type":"session.joined","requestId":"r1","payload":{"sessionId":"018f...","state":"LIVE","participantId":"0189...","role":"TEACHER","displayName":"Ms. Ray","recovery":null}}
 S → C: {"type":"session.state","requestId":"r1","payload":{"sessionId":"018f...","state":"LIVE",...}}
 

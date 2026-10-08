@@ -1,9 +1,16 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startTestApp, stopTestApp, resetDatabase, type IntegrationContext } from "./helpers.js";
+import {
+  startTestApp,
+  stopTestApp,
+  resetDatabase,
+  registerAndCreateSession,
+  type IntegrationContext,
+} from "./helpers.js";
 
 async function createSession(ctx: IntegrationContext, name = "Quiz session"): Promise<string> {
-  const { body } = await ctx.request("POST", "/sessions", { name });
-  return body.session.id;
+  // Phase 10.7: POST /sessions requires authentication; the creator owns it.
+  const { sessionId } = await registerAndCreateSession(ctx.app, name);
+  return sessionId;
 }
 
 describe("Quizzes API (integration)", () => {

@@ -10,7 +10,7 @@
 ## Context
 
 Phase 8 will generate real traffic. Before that, the system must be
-*measurable* — without gaining a second source of truth, a new failure mode, or
+_measurable_ — without gaining a second source of truth, a new failure mode, or
 unbounded memory. Constraints from AGENT.md and earlier phases:
 
 - Metrics/logs are observation. They must never hold business state, never be
@@ -80,7 +80,7 @@ in `buildApp` and exposed as `app.metrics` (null when `METRICS_ENABLED=false`).
 
 - **Cardinality is the failure mode of metrics.** One `sessionId` label is
   enough to produce unbounded series and kill a scrape target under load.
-  Restricting labels to enums makes cardinality bounded *by construction*, and
+  Restricting labels to enums makes cardinality bounded _by construction_, and
   the tests assert it rather than trusting review.
 - **Process-local registries keep the architecture intact.** Each instance is
   scraped separately; nothing crosses Redis, nothing lands in PostgreSQL, and

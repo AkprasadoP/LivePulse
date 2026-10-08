@@ -8,11 +8,6 @@ import type {
 import { NotFoundError, InvalidStateTransitionError } from "../../shared/errors.js";
 import { canTransition } from "./session.state.js";
 
-export interface CreateSessionInput {
-  name: string;
-  creatorDisplayName: string;
-}
-
 export type SessionWithCreator = Prisma.SessionGetPayload<{ include: { creator: true } }>;
 
 /**
@@ -23,33 +18,13 @@ export type SessionWithCreator = Prisma.SessionGetPayload<{ include: { creator: 
  * (check-and-set), which is atomic in PostgreSQL: concurrent transitions
  * cannot interleave, exactly one caller wins, the loser gets
  * InvalidStateTransitionError. See ADR-002.
+ *
+ * Phase 10.7: sessions are created exclusively for existing users
+ * (createWithExistingCreator). The displayName auto-provisioning creator
+ * is retired — creator identity arrives verified, never minted from input.
  */
 export class SessionRepository {
   public constructor(private readonly prisma: PrismaClient) {}
-
-  public async createWithCreator(input: CreateSessionInput): Promise<{
-    session: Session;
-    creatorUser: { id: string; displayName: string };
-    teacherParticipant: SessionParticipant;
-  }> {
-    return this.prisma.$transaction(async (tx) => {
-      // Auto-provisioned creator (approved Phase 1 decision — no auth yet).
-      const creatorUser = await tx.user.create({
-        data: { displayName: input.creatorDisplayName },
-      });
-
-      const session = await tx.session.create({
-        data: { name: input.name, creatorId: creatorUser.id },
-      });
-
-      // The creator becomes the session's first TEACHER participant.
-      const teacherParticipant = await tx.sessionParticipant.create({
-        data: { sessionId: session.id, userId: creatorUser.id, role: "TEACHER" },
-      });
-
-      return { session, creatorUser, teacherParticipant };
-    });
-  }
 
   public async getById(id: string): Promise<SessionWithCreator | null> {
     return this.prisma.session.findUnique({ where: { id }, include: { creator: true } });
@@ -57,9 +32,9 @@ export class SessionRepository {
 
   /**
    * Phase 10.6: create a session owned by an ALREADY authenticated user.
-   * Same atomic shape as createWithCreator (session + TEACHER participant or
-   * neither) but mints no user row — the creator identity comes from the
-   * verified token subject, never from request input.
+   * Atomic: session + TEACHER participant or neither. It mints no user row —
+   * the creator identity comes from the verified token subject, never from
+   * request input.
    */
   public async createWithExistingCreator(input: { name: string; creatorId: string }): Promise<{
     session: Session;

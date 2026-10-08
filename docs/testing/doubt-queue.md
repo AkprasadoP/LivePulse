@@ -74,4 +74,5 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/dou
 - `doubt.bump` and `doubt.cancel` (not implemented; see ADR-007).
 - Load-scale queue storms (k6, a later phase).
 - Pagination beyond the recovery cap.
-- Person-level identity (displayName seam; ADR-006 §5).
+- Person-level identity beyond the authenticated user (see
+  `docs/architecture/recovery.md` §5).

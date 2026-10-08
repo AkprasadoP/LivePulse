@@ -4,7 +4,7 @@ Establishes the load-testing foundation. Nothing here optimizes or changes
 production architecture. Phase 8 exists to **measure** first, then to reason
 about bottlenecks — never the other way around.
 
-> This directory is the *successor* of AGENT.md's deferred `k6` tooling.
+> This directory is the _successor_ of AGENT.md's deferred `k6` tooling.
 > k6 is the intended production-grade harness. This project currently runs on
 > Node 26 with `pnpm@12`; the npm registry in this environment does not serve a
 > versioned `k6` module (only the `0.0.0` dummy stub), so the Phase 8.1
@@ -12,19 +12,25 @@ about bottlenecks — never the other way around.
 > `ws` and `fastify`/`http` surface the app already owns. The k6 directory and
 > its `.gitkeep` are retained so the planned k6 migration maps cleanly onto
 > the same scenario layout.
+>
+> **Phase 10.7 (authentication):** `POST /sessions` requires a bearer token.
+> `http/sessions.js` registers a creator in `setup()`; `run.js` registers one
+> before the measured window. `session.join` no longer accepts
+> `participant: { displayName }` — the WS scenario joins view-only (it measures
+> connection/message throughput, not participant binding).
 
 ## 1. Prerequisites
 
 Run these on the **same machine** that will run `pnpm dev` (or the
 dockerized stack), so that "local" means what it says.
 
-| Requirement | Version | Purpose |
-| --- | --- | --- |
-| Node.js | `>= 22` | Runs the load harness + the app |
-| `pnpm` | `12.5.1` (repo default) | Install scripts |
-| Docker + Docker Compose | any | PostgreSQL 5433 + Redis 6380 (optional, for full stack) |
-| `psql` | 15+ | Inspect the test DB during results review |
-| `redis-cli` | 7+ | Inspect Redis during results review |
+| Requirement             | Version                 | Purpose                                                 |
+| ----------------------- | ----------------------- | ------------------------------------------------------- |
+| Node.js                 | `>= 22`                 | Runs the load harness + the app                         |
+| `pnpm`                  | `12.5.1` (repo default) | Install scripts                                         |
+| Docker + Docker Compose | any                     | PostgreSQL 5433 + Redis 6380 (optional, for full stack) |
+| `psql`                  | 15+                     | Inspect the test DB during results review               |
+| `redis-cli`             | 7+                      | Inspect Redis during results review                     |
 
 Do **not** point the load harness at any host other than the local dev
 stack. Production targets are refused by a hardcoded default and an explicit
@@ -116,17 +122,17 @@ interpreter is a **one-word change** when k6 becomes available.
 Load tests are added **incrementally**. Never jump straight to production
 size.
 
-| Phase | Scenario | VUs | Duration | What it measures |
-| --- | --- | --- | --- | --- |
-| 8.1 (this phase) | `http-sessions` | **2** (smoke) / **10** (baseline) | **5 s** (smoke) / **30 s** (baseline) | session creation — HTTP baseline |
-| 8.1 (this phase) | `websocket-connections` | **10** | **30 s** | real `/ws` joins — connection success, frame throughput, churn |
-| 8.2 | `http-sessions` (25 / 50 / 100) | 25 → 50 → 100 | 30 s each | HTTP throughput + latency percentiles |
-| 8.2 | `websocket-connections` (25 / 50 / 100) | 25 → 50 → 100 | 30 s each | WS throughput, CPU, memory, event loop |
-| 8.2 | `quiz-answer-storm` | 100 → 250 → 500 → 1000 | 30 s each | PostgreSQL row-lock election cost, winner invariant |
-| 8.3 | two-instance distribution | 50/50 | per scenario | cross-instance propagation, Redis Pub/Sub throughput |
-| 8.4 | reconnect storm | 1000 | per scenario | recovery latency, churn, Redis load |
-| 8.5 | doubt queue storm | 500 | 30 s | creation latency, enqueueSeq allocation, lock contention |
-| 8.6 | failure under load | per scenario | per scenario | Redis outage, instance kill, convergence |
+| Phase            | Scenario                                | VUs                               | Duration                              | What it measures                                               |
+| ---------------- | --------------------------------------- | --------------------------------- | ------------------------------------- | -------------------------------------------------------------- |
+| 8.1 (this phase) | `http-sessions`                         | **2** (smoke) / **10** (baseline) | **5 s** (smoke) / **30 s** (baseline) | session creation — HTTP baseline                               |
+| 8.1 (this phase) | `websocket-connections`                 | **10**                            | **30 s**                              | real `/ws` joins — connection success, frame throughput, churn |
+| 8.2              | `http-sessions` (25 / 50 / 100)         | 25 → 50 → 100                     | 30 s each                             | HTTP throughput + latency percentiles                          |
+| 8.2              | `websocket-connections` (25 / 50 / 100) | 25 → 50 → 100                     | 30 s each                             | WS throughput, CPU, memory, event loop                         |
+| 8.2              | `quiz-answer-storm`                     | 100 → 250 → 500 → 1000            | 30 s each                             | PostgreSQL row-lock election cost, winner invariant            |
+| 8.3              | two-instance distribution               | 50/50                             | per scenario                          | cross-instance propagation, Redis Pub/Sub throughput           |
+| 8.4              | reconnect storm                         | 1000                              | per scenario                          | recovery latency, churn, Redis load                            |
+| 8.5              | doubt queue storm                       | 500                               | 30 s                                  | creation latency, enqueueSeq allocation, lock contention       |
+| 8.6              | failure under load                      | per scenario                      | per scenario                          | Redis outage, instance kill, convergence                       |
 
 **Rules:**
 
@@ -143,15 +149,59 @@ size.
 
 The harness captures **application-level** metrics only:
 
-- HTTP: request count, request failures, request duration (ms), status codes
-- WebSocket: connection success/failure, connection duration (ms), message
-  count, `session.joined` latency
-- PostgreSQL (diagnostic reads only): query count, slow-query count, errors
-- Redis (diagnostic reads only): connection state, Pub/Sub notice count
+- HTTP: request count (`http.requests`), request failures (`http.failures`),
+  every completed request's duration sample in `http.durationMs`
+  (`count`/`min`/`max`/`mean`/`p50`/`p90`/`p95`/`p99`), status codes
+  (`http.statusCounts`)
+- WebSocket: connection success/failure counters
+  (`ws.connectionSuccess`/`ws.connectionFail`), completed connection-duration
+  samples in `ws.connectionDurationMs`, completed message-duration samples in
+  `ws.messageDurationMs`, frame counters (`ws.messagesSent`/`ws.messagesReceived`),
+  open-at-end gauge (`ws.connectionsOpenAtEnd`)
+- PostgreSQL — diagnostic connectivity probe only (source: `pg_isready`).
+  Never query/operation throughput. No `pg_stat_statements` in this phase.
+- Redis — diagnostic connectivity probe only (source: `redis-cli ping`).
+  Never operation throughput.
 
 The harness **does not** duplicate the application's Prometheus metrics. The
 `prom-client` registry that already exists in production stays untouched by
 the load harness.
+
+### 6.1 Rates
+
+- `requestsPerSec` = `http.requests / durationSeconds` (all completed HTTP
+  attempts, including failures).
+- `successfulRequestsPerSec` = `(http.requests - http.failures) / durationSeconds`
+  (only 2xx/3xx completions).
+- `wsConnectionsPerSec` = `ws.connections / durationSeconds`.
+- `wsMessageRate` = `ws.messagesReceived / durationSeconds`.
+
+### 6.2 Instruments: k6 vs run.js
+
+k6-native metrics (`Trend`/`Counter`/`Rate` in `http/sessions.js` and
+`websocket/connections.js`) are the forward-looking benchmark source.
+`run.js` is the zero-dependency fallback/smoke harness for this environment.
+The two implementations measure equivalent concepts (counts, duration
+samples, rates, percentiles) but are separate instruments: never mix or
+compare numbers across harnesses as if they came from one tool.
+
+### 6.3 Measurement invariants (fail-closed, never fabricated)
+
+- HTTP: `http.durationMs.count === http.requests`. Every completed attempt
+  (including transport errors, which count toward both `requests` and
+  `failures`) contributes exactly one duration sample.
+- WS: `ws.connectionDurationMs.count === ws.connectionSuccess` (one sample
+  per successfully opened connection, captured on close or at stop), and
+  `ws.messageDurationMs.count === ws.messagesReceived` (one sample per
+  received frame).
+- `timestamp` is wall-clock (`new Date().toISOString()`), never
+  `performance.now()`-derived.
+- If a sample count differs from its completed-operation count (or no
+  operations completed), `measurement.valid` is `false` and the run is
+  invalid: missing samples are never fabricated or inferred, and zero-filled
+  summaries must not be read as benchmarks.
+- `pgs`/`redis` carry `source` (`pg_isready` / `redis-cli ping`) plus
+  `kind: "connectivity-probe"` and must read as probes, not throughput.
 
 ### Success criteria for the Phase 8.1 smoke
 

@@ -7,8 +7,6 @@ import {
   WsTestClient,
   type IndependentInstance,
 } from "./helpers.js";
-import { hashPassword } from "../../src/modules/auth/password.js";
-
 /**
  * Phase 10.5 WebSocket authentication. New file only; existing helpers and
  * suites are untouched. Auth tables + created rows are cleaned here
@@ -40,21 +38,40 @@ describe("WS authentication (Phase 10.5)", () => {
     return { userId: body.user.id as string, accessToken: body.accessToken as string };
   }
 
+  /**
+   * Phase 10.7: register the creator (real credential) and create a session
+   * owned by it. Returns the creator's access token so tests can act as the
+   * owner without minting a second credential for the same user.
+   */
   async function makeSession(
     instance: IndependentInstance,
     creatorDisplayName: string,
-  ): Promise<string> {
-    const res = await instance.app.inject({
+  ): Promise<{ sessionId: string; accessToken: string; displayName: string }> {
+    const email = `creator-${stamp()}-${Math.floor(Math.random() * 1e6)}@example.com`;
+    const reg = await instance.app.inject({
       method: "POST",
-      url: "/sessions",
+      url: "/auth/register",
       payload: JSON.stringify({
-        name: `WSAuth ${stamp()}`,
-        creator: { displayName: creatorDisplayName },
+        email,
+        password: "ws-auth-pw-12",
+        displayName: creatorDisplayName,
       }),
       headers: { "content-type": "application/json" },
     });
+    expect(reg.statusCode).toBe(201);
+    const token = (reg.json() as any).accessToken as string;
+    const res = await instance.app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: JSON.stringify({ name: `WSAuth ${stamp()}` }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    });
     expect(res.statusCode).toBe(201);
-    return (res.json() as any).session.id as string;
+    return {
+      sessionId: (res.json() as any).session.id as string,
+      accessToken: token,
+      displayName: creatorDisplayName,
+    };
   }
 
   async function authJoin(
@@ -89,7 +106,7 @@ describe("WS authentication (Phase 10.5)", () => {
     try {
       const email = `bind-${stamp()}@example.com`;
       const { userId, accessToken } = await register(instance, email, `Bind-${stamp()}`);
-      const sessionId = await makeSession(instance, `Creator-${stamp()}`);
+      const { sessionId } = await makeSession(instance, `Creator-${stamp()}`);
       const { client, joined } = await authJoin(instance, accessToken, sessionId);
       try {
         const payload = joined.payload as any;
@@ -115,7 +132,7 @@ describe("WS authentication (Phase 10.5)", () => {
     try {
       // Victim teacher: real session creator (TEACHER in DB).
       const teacherName = `VictimTeacher-${stamp()}`;
-      const sessionId = await makeSession(instance, teacherName);
+      const { sessionId } = await makeSession(instance, teacherName);
       const teacherUser = await prisma.user.findUniqueOrThrow({
         where: { displayName: teacherName },
       });
@@ -167,24 +184,35 @@ describe("WS authentication (Phase 10.5)", () => {
         );
         expect((notParticipant.payload as any).code).toBe("NOT_A_PARTICIPANT");
 
-        // 2) Known-field displayName spoof is IGNORED when authenticated:
-        // naming the victim binds the ATTACKER's own participant, as STUDENT.
+        // 2) displayName identity claims are REJECTED outright (Phase 10.7):
+        // the participant field no longer exists — naming the victim binds
+        // nothing and joins nothing.
         attacker.send({
           type: "session.join",
           requestId: "a-spoof-name",
           payload: { sessionId, participant: { displayName: teacherName } },
         });
-        const joined = await attacker.waitFor(
-          (m) => m.type === "session.joined" && (m as any).requestId === "a-spoof-name",
+        const nameRejected = await attacker.waitFor(
+          (m) => m.type === "error" && (m as any).requestId === "a-spoof-name",
         );
-        const bound = (joined.payload as any).participantId as string;
-        const attackerParticipant = await prisma.sessionParticipant.findUniqueOrThrow({
-          where: { sessionId_userId: { sessionId, userId: attackerId } },
+        expect((nameRejected.payload as any).code).toBe("INVALID_REQUEST");
+        // Still unjoined after both spoof attempts: no participant was bound.
+        attacker.send({
+          type: "quiz.start",
+          requestId: "a-evil-2",
+          payload: { quizId: "00000000-0000-0000-0000-000000000000" },
         });
-        expect(bound).toBe(attackerParticipant.id);
-        expect(bound).not.toBe(teacherParticipant.id);
-        expect((joined.payload as any).role).toBe("STUDENT");
-        expect((joined.payload as any).displayName).not.toBe(teacherName);
+        const stillOutsider = await attacker.waitFor(
+          (m) => m.type === "error" && (m as any).requestId === "a-evil-2",
+        );
+        expect((stillOutsider.payload as any).code).toBe("NOT_A_PARTICIPANT");
+        // The victim's participant row is untouched: still exactly the
+        // creator's TEACHER binding, no attacker row created by spoofing.
+        expect(
+          await prisma.sessionParticipant.findUnique({
+            where: { sessionId_userId: { sessionId, userId: attackerId } },
+          }),
+        ).toBeNull();
       } finally {
         await attacker.close();
       }
@@ -203,7 +231,7 @@ describe("WS authentication (Phase 10.5)", () => {
         `re-${stamp()}@example.com`,
         `Re-${stamp()}`,
       );
-      const sessionId = await makeSession(instance, `Creator-${stamp()}`);
+      const { sessionId } = await makeSession(instance, `Creator-${stamp()}`);
       const first = await authJoin(instance, accessToken, sessionId);
       const firstPid = ((first.joined.payload as any).participantId ?? null) as string | null;
       expect(firstPid).toBeTypeOf("string");
@@ -239,7 +267,7 @@ describe("WS authentication (Phase 10.5)", () => {
     }
   });
 
-  it("expired/tampered tokens fail with UNAUTHENTICATED and leave join on the legacy path", async () => {
+  it("expired/tampered tokens fail with UNAUTHENTICATED; unauthenticated joins are view-only", async () => {
     await clean();
     const instance = await startIndependentInstance(`ws-auth-bad-${stamp()}`);
     try {
@@ -248,7 +276,7 @@ describe("WS authentication (Phase 10.5)", () => {
         `bad-${stamp()}@example.com`,
         `Bad-${stamp()}`,
       );
-      const sessionId = await makeSession(instance, `Creator-${stamp()}`);
+      const { sessionId } = await makeSession(instance, `Creator-${stamp()}`);
       const client = new WsTestClient();
       try {
         await client.connect(instance.port);
@@ -262,17 +290,26 @@ describe("WS authentication (Phase 10.5)", () => {
           (m) => m.type === "error" && (m as any).requestId === "bad-1",
         );
         expect((err.payload as any).code).toBe("UNAUTHENTICATED");
-        // Still unauthenticated: a displayName join binds the legacy identity.
-        const legacyName = `Legacy-${stamp()}`;
+        // Still unauthenticated: joins are view-only (no participant bound,
+        // no displayName identity). DisplayName claims are rejected outright.
         client.send({
           type: "session.join",
           requestId: "bad-join",
-          payload: { sessionId, participant: { displayName: legacyName } },
+          payload: { sessionId },
         });
         const joined = await client.waitFor(
           (m) => m.type === "session.joined" && (m as any).requestId === "bad-join",
         );
-        expect((joined.payload as any).displayName).toBe(legacyName);
+        expect((joined.payload as any).participantId).toBeNull();
+        client.send({
+          type: "session.join",
+          requestId: "bad-join-name",
+          payload: { sessionId, participant: { displayName: `Legacy-${stamp()}` } },
+        });
+        const nameRejected = await client.waitFor(
+          (m) => m.type === "error" && (m as any).requestId === "bad-join-name",
+        );
+        expect((nameRejected.payload as any).code).toBe("INVALID_REQUEST");
       } finally {
         await client.close();
       }
@@ -286,27 +323,11 @@ describe("WS authentication (Phase 10.5)", () => {
     await clean();
     const instance = await startIndependentInstance(`ws-auth-teacher-${stamp()}`);
     try {
-      // Credential claimed directly onto the auto-provisioned creator user
-      // (test-only setup; claiming flow is a later phase).
+      // The creator is registered with a real credential by makeSession; its
+      // access token is the creator's own. No second credential is minted
+      // (Credential.userId is unique — one credential per user by design).
       const teacherName = `CreatorTeacher-${stamp()}`;
-      const sessionId = await makeSession(instance, teacherName);
-      const creator = await prisma.user.findUniqueOrThrow({ where: { displayName: teacherName } });
-      const creatorEmail = `creator-${stamp()}@example.com`;
-      await prisma.credential.create({
-        data: {
-          userId: creator.id,
-          email: creatorEmail,
-          passwordHash: await hashPassword("teacher-pw-12"),
-        },
-      });
-      const login = await instance.app.inject({
-        method: "POST",
-        url: "/auth/login",
-        payload: JSON.stringify({ email: creatorEmail, password: "teacher-pw-12" }),
-        headers: { "content-type": "application/json" },
-      });
-      expect(login.statusCode).toBe(200);
-      const token = (login.json() as any).accessToken as string;
+      const { sessionId, accessToken: token } = await makeSession(instance, teacherName);
 
       const client = new WsTestClient();
       try {
@@ -354,17 +375,8 @@ describe("WS authentication (Phase 10.5)", () => {
     await clean();
     const instance = await startIndependentInstance(`ws-authz-${stamp()}`);
     try {
-      // Session A with a real quiz, owned by its auto-provisioned creator.
-      const sessA = await instance.app.inject({
-        method: "POST",
-        url: "/sessions",
-        payload: JSON.stringify({
-          name: `AuthzA ${stamp()}`,
-          creator: { displayName: `OwnerA-${stamp()}` },
-        }),
-        headers: { "content-type": "application/json" },
-      });
-      const sessionA = (sessA.json() as any).session.id as string;
+      // Session A with a real quiz, owned by its registered creator.
+      const { sessionId: sessionA } = await makeSession(instance, `OwnerA-${stamp()}`);
       const quizA = await instance.app.inject({
         method: "POST",
         url: `/sessions/${sessionA}/quizzes`,
@@ -410,5 +422,82 @@ describe("WS authentication (Phase 10.5)", () => {
       await instance.close();
       await clean();
     }
+  });
+
+  it("authenticated A naming B's displayName binds A's own participant, never B's", async () => {
+    await clean();
+    const instance = await startIndependentInstance(`ws-auth-name-${stamp()}`);
+    try {
+      // B owns the session: TEACHER participant named B.
+      const bName = `UserB-${stamp()}`;
+      const { sessionId } = await makeSession(instance, bName);
+      const bUser = await prisma.user.findUniqueOrThrow({ where: { displayName: bName } });
+      const bParticipant = await prisma.sessionParticipant.findUniqueOrThrow({
+        where: { sessionId_userId: { sessionId, userId: bUser.id } },
+      });
+      expect(bParticipant.role).toBe("TEACHER");
+
+      const aName = `UserA-${stamp()}`;
+      const a = await register(instance, `name-a-${stamp()}@example.com`, aName);
+      const client = new WsTestClient();
+      try {
+        await client.connect(instance.port);
+        client.send({
+          type: "auth.authenticate",
+          requestId: "n-auth",
+          payload: { token: a.accessToken },
+        });
+        await client.waitFor((m) => m.type === "auth.authenticated");
+
+        // Naming B (the teacher) is display data, not identity: the resurrected
+        // identity field is rejected outright and binds nothing.
+        client.send({
+          type: "session.join",
+          requestId: "n-spoof",
+          payload: { sessionId, participant: { displayName: bName } },
+        });
+        const rejected = await client.waitFor(
+          (m) => m.type === "error" && (m as any).requestId === "n-spoof",
+        );
+        expect((rejected.payload as any).code).toBe("INVALID_REQUEST");
+
+        // A real join resolves A's OWN participant (STUDENT) — never B's.
+        client.send({ type: "session.join", requestId: "n-join", payload: { sessionId } });
+        const joined = await client.waitFor(
+          (m) => m.type === "session.joined" && (m as any).requestId === "n-join",
+        );
+        const payload = joined.payload as any;
+        expect(payload.role).toBe("STUDENT");
+        expect(payload.displayName).toBe(aName);
+        expect(payload.participantId).not.toBe(bParticipant.id);
+        const aRow = await prisma.sessionParticipant.findUniqueOrThrow({
+          where: { sessionId_userId: { sessionId, userId: a.userId } },
+        });
+        expect(payload.participantId).toBe(aRow.id);
+        // B's TEACHER row is untouched by A's attempts.
+        expect(
+          await prisma.sessionParticipant.findUnique({
+            where: { sessionId_userId: { sessionId, userId: bUser.id } },
+          }),
+        ).not.toBeNull();
+      } finally {
+        await client.close();
+      }
+    } finally {
+      await instance.close();
+      await clean();
+    }
+  });
+
+  it("historical credential-less users are preserved (no backfill, no deletion)", async () => {
+    await clean();
+    // A pre-auth user row: created by the retired displayName find-or-create
+    // path and never given a credential. Phase 10.7 removes the identity seam,
+    // not the historical rows — they must survive untouched.
+    const legacy = await prisma.user.create({ data: { displayName: `Legacy-${stamp()}` } });
+    expect(await prisma.credential.findUnique({ where: { userId: legacy.id } })).toBeNull();
+    const reread = await prisma.user.findUnique({ where: { id: legacy.id } });
+    expect(reread?.displayName).toBe(legacy.displayName);
+    await clean();
   });
 });

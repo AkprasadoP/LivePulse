@@ -41,15 +41,13 @@ export type ClientEnvelope = z.infer<typeof clientEnvelopeSchema>;
 export const sessionJoinSchema = z.strictObject({
   sessionId: z.uuid(),
   /**
-   * Development identity seam (Phase 3): the participant to bind to this
-   * connection. NOT authentication — displayName is the temporary
-   * credential; see docs/decisions/002 and the protocol doc identity section.
+   * Phase 10.7: the `participant: { displayName }` identity field is GONE.
+   * Identity comes exclusively from `auth.authenticate` (connection.userId);
+   * a join without authentication is view-only by design. strictObject
+   * rejects any resurrected identity claim (userId/participantId/role or
+   * displayName) with INVALID_REQUEST instead of silently downgrading the
+   * caller to a viewer they did not ask to be.
    */
-  participant: z
-    .strictObject({
-      displayName: z.string().min(1).max(100),
-    })
-    .optional(),
 });
 
 export const sessionLeaveSchema = z.strictObject({});

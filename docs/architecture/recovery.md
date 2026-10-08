@@ -100,8 +100,9 @@ It sends the same `session.join` it always sent — no new event, no new
 envelope field. The **smallest contract change** that makes join sufficient
 for recovery: the `session.joined` response now carries an optional
 `recovery` snapshot object (see §4). A client that wants recovery
-participation re-joins with its `participant.displayName` and reads
-`session.joined.recovery`.
+participation authenticates the same user, re-joins, and reads
+`session.joined.recovery`; the participant is resolved by `(sessionId,
+userId)`.
 
 ### F. Can the client reconnect to a different WS instance?
 
@@ -124,8 +125,9 @@ reconnect to WS-B, recover, continue participating (see
 | session ended                      | `session.state: "ENDED"`, no quiz/question section                    |
 | nothing has happened yet           | `recovery` fields stay `null` (quiz never started)                    |
 
-The participant's role/identity binding is re-established by the same
-displayName seam (§5), so answering after reconnect works as before.
+The participant's role/identity binding is re-established by the
+authenticated user (§5) — the same `(sessionId, userId)` membership row — so
+answering after reconnect works as before.
 
 ### H. How are duplicate client submissions handled?
 
@@ -187,7 +189,7 @@ WebSocket disconnect (crash, network, instance shutdown)
         ↓
 client reconnects (any instance)
         ↓
-session.join (same protocol as always, participant.displayName seam)
+auth.authenticate + session.join (participant resolved by (sessionId, userId))
         ↓
 server reads PostgreSQL: session + quiz + question + own answer + standings
         ↓
@@ -285,42 +287,34 @@ Guarantees of the snapshot (each enforced by a test):
 8. **Not a diff:** the snapshot says nothing about _what changed_ while the
    client was away. Clients that need change history do not get it here.
 
-View-only joins (no `participant`) get the same `recovery` object minus
+Unauthenticated (view-only) joins get the same `recovery` object minus
 `ownAnswer` (always `null` — there is no bound participant to read answers
 for).
 
-## 5. Identity / participation (limitations, documented honestly)
+## 5. Identity / participation
 
-Phase 3's development identity seam is preserved: `participant.displayName`
-is the only credential. Reconnect with the same displayName binds to the
-same `users` row and the same `session_participants` row
+Identity is authenticated (Phase 10.7). A reconnecting client authenticates
+the same user (`auth.authenticate`) and re-joins; the server resolves the
+same `session_participants` row by `(sessionId, userId)`
 (`UNIQUE(sessionId, userId)`, race-safe find-or-create) — which is what
 makes `recovery.ownAnswer` resolve to the reconnecting participant.
 
 The server therefore classifies an incoming join as:
 
-- **same participant reconnecting** — displayName resolves to an existing
-  participant row → identity continuity _of the participant record_,
-  including stored answers;
-- **new participant** — unknown displayName → new user + participant row;
-- **duplicate connection** — a second simultaneous socket joining with the
-  same displayName binds to the _same_ participant row. Allowed (unchanged
-  since Phase 3: sockets are connection-keyed, not deduplicated). Both
-  connections share verdicts and receive broadcasts; duplicate
-  _submissions_ remain idempotent at the database.
+- **same participant reconnecting** — the same authenticated userId resolves
+  to the existing participant row → identity continuity _of the participant
+  record_, including stored answers;
+- **new participant** — a first-time userId → a new membership row;
+- **duplicate connection** — a second simultaneous socket for the same
+  authenticated user binds to the _same_ participant row. Allowed (sockets
+  are connection-keyed, not deduplicated). Both connections share verdicts
+  and receive broadcasts; duplicate _submissions_ remain idempotent at the
+  database.
 
-**This is NOT identity continuity of a person.** displayName is not a
-credential; anyone can claim any name and thereby inherit a participant's
-record — including `recovery.ownAnswer`. The system provides _record
-continuity keyed by a self-declared label_, deliberately. True identity
-requires the JWT/auth phase; inventing a token scheme here would be
-authentication theater. The limitation is documented rather than solved.
-
-There is also no session-resume token and no `session.reconnect` event:
-AGENT.md's protocol sketch lists one, but with a find-or-create name seam a
-separate event would add surface without adding guarantees. It is deferred
-to the auth phase, where a real credential makes a distinct reconnect path
-meaningful.
+**This IS identity continuity of the authenticated user** (the token subject),
+_not a self-declared label_: `displayName` is never consulted for identity.
+There is still no session-resume token and no `session.reconnect` event — a
+plain re-authenticate + `session.join` is sufficient and adds no new surface.
 
 ## 6. What is and is not guaranteed
 
@@ -345,7 +339,8 @@ meaningful.
   can reconcile against authoritative PostgreSQL state.
 - No delivery of events that happen _between_ the snapshot read and the
   join response (a sub-millisecond window; subsequent live events close it).
-- No person-level identity (displayName seam; see §5).
+- No session-resume token / distinct reconnect event — reconnect is a
+  re-authenticate + `session.join` (§5).
 - No presence: the server does not track who is "currently connected" as
   durable state (later phase).
 - No outbox/durable queue for undelivered frames, ever, in this phase.

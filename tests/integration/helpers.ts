@@ -18,11 +18,20 @@ export const TEST_DATABASE_URL =
   process.env.LIVEPULSE_TEST_DATABASE_URL ??
   "postgresql://livepulse:livepulse@localhost:5433/livepulse_test";
 
+/**
+ * Phase 10.7: ONE shared test access-token secret across every test instance.
+ * Tokens must verify on whichever instance a client lands on (especially
+ * multi-instance suites) — per-instance ephemeral secrets would make
+ * cross-instance tokens invalid. Test-only, never production-shaped.
+ */
+export const TEST_AUTH_ACCESS_SECRET = "test-access-secret-0123456789abcdef";
+
 const testConfig = loadConfig({
   NODE_ENV: "test",
   DATABASE_URL: TEST_DATABASE_URL,
   REDIS_URL: "redis://localhost:6380",
   PORT: "0", // ephemeral port: never collides with a dev server
+  AUTH_ACCESS_SECRET: TEST_AUTH_ACCESS_SECRET,
 });
 
 /** Poll until the predicate holds; used for async server-side state (registry cleanup, heartbeats). */
@@ -61,6 +70,7 @@ export interface IntegrationContext {
     method: "GET" | "POST",
     url: string,
     payload?: unknown,
+    headers?: Record<string, string>,
   ) => Promise<{
     statusCode: number;
     body: any;
@@ -78,6 +88,24 @@ interface TestServer {
 let current: TestServer | null = null;
 
 /**
+ * Phase 10.7: every app currently open in this process (any flavour).
+ * registerTestUser injects a registration into one of them when callers don't
+ * pass an explicit app. Tokens verify on EVERY instance via the shared
+ * TEST_AUTH_ACCESS_SECRET and users are global (shared test DB), so any OPEN
+ * app is a valid target — tracking all of them keeps this correct when the
+ * most recently started instance is closed (crash/shutdown tests) while
+ * others remain serving.
+ */
+const openApps: FastifyInstance[] = [];
+function trackApp(app: FastifyInstance): void {
+  openApps.push(app);
+}
+function untrackApp(app: FastifyInstance): void {
+  const index = openApps.indexOf(app);
+  if (index >= 0) openApps.splice(index, 1);
+}
+
+/**
  * Start the app for HTTP-only suites: fastify.inject() needs no listener and
  * keeps tests faster and port-free. Unchanged from Phase 1 behavior.
  */
@@ -88,14 +116,22 @@ export async function startTestApp(): Promise<IntegrationContext> {
     const app = await buildApp({ config: testConfig });
     await app.ready();
 
-    const request = async (method: "GET" | "POST", url: string, payload?: unknown) => {
+    const request = async (
+      method: "GET" | "POST",
+      url: string,
+      payload?: unknown,
+      headers?: Record<string, string>,
+    ) => {
       const response = await app.inject({
         method,
         url,
         // Conditional spread: exactOptionalPropertyTypes forbids explicit undefined.
         ...(payload === undefined
           ? {}
-          : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+          : {
+              payload: JSON.stringify(payload),
+              headers: { "content-type": "application/json", ...(headers ?? {}) },
+            }),
       });
       let body: any = response.body;
       try {
@@ -107,6 +143,7 @@ export async function startTestApp(): Promise<IntegrationContext> {
     };
 
     current = { app, prisma, port: null, request };
+    trackApp(app);
   }
   const { app, prisma, request } = current;
   return { app, prisma, request };
@@ -155,6 +192,7 @@ export async function startIndependentInstance(
     REDIS_URL: process.env.LIVEPULSE_TEST_REDIS_URL ?? "redis://localhost:6380",
     PORT: "0",
     INSTANCE_ID: instanceId,
+    AUTH_ACCESS_SECRET: TEST_AUTH_ACCESS_SECRET,
     DISTRIBUTION_ENABLED: (overrides.distributionEnabled ?? true) ? "true" : "false",
     // Conditional spread: exactOptionalPropertyTypes forbids explicit undefined.
     ...(overrides.presenceDigestIntervalMs === undefined
@@ -179,12 +217,16 @@ export async function startIndependentInstance(
   const layer = app.wsLayer;
   if (layer === null) throw new Error("WS layer missing after listen");
   await layer.distributionReady;
+  trackApp(app);
   return {
     app,
     port: address.port,
     instanceId,
     distributionReady: Promise.resolve(),
-    close: () => app.close(),
+    close: async () => {
+      untrackApp(app);
+      await app.close();
+    },
   };
 }
 
@@ -246,13 +288,21 @@ export async function startListeningServer(): Promise<ListeningServer> {
     throw new Error("Expected the test server to listen on a TCP port");
   }
 
-  const request = async (method: "GET" | "POST", url: string, payload?: unknown) => {
+  const request = async (
+    method: "GET" | "POST",
+    url: string,
+    payload?: unknown,
+    headers?: Record<string, string>,
+  ) => {
     const response = await app.inject({
       method,
       url,
       ...(payload === undefined
         ? {}
-        : { payload: JSON.stringify(payload), headers: { "content-type": "application/json" } }),
+        : {
+            payload: JSON.stringify(payload),
+            headers: { "content-type": "application/json", ...(headers ?? {}) },
+          }),
     });
     let body: any = response.body;
     try {
@@ -264,12 +314,15 @@ export async function startListeningServer(): Promise<ListeningServer> {
   };
 
   current = { app, prisma, port: address.port, request };
+  trackApp(app);
   return current as ListeningServer;
 }
 
 export async function stopTestApp(): Promise<void> {
   if (!current) return;
   // app.close() runs our onClose hook (WS layer teardown) before Prisma's.
+  const stopped = current.app;
+  untrackApp(stopped);
   await current.app.close();
   await current.prisma.$disconnect(); // the harness's own client
   current = null;
@@ -292,8 +345,13 @@ export async function resetDatabase(explicitPrisma?: PrismaClient): Promise<void
   for (let attempt = 1; ; attempt += 1) {
     try {
       await target.$executeRawUnsafe(
-        `TRUNCATE TABLE answers, doubts, questions, quizzes, session_participants, sessions, users RESTART IDENTITY CASCADE`,
+        `TRUNCATE TABLE answers, doubts, questions, quizzes, session_participants, sessions, users, credentials, auth_sessions RESTART IDENTITY CASCADE`,
       );
+      // Phase 10.7: user rows are gone, so cached test identities (userIds +
+      // tokens pointing at deleted rows) must go too — otherwise a later
+      // joinAs with the same displayName would authenticate as a ghost.
+      testUsers.clear();
+      testUserCounter = 0;
       return;
     } catch (error) {
       const code =
@@ -314,6 +372,115 @@ export async function resetDatabase(explicitPrisma?: PrismaClient): Promise<void
 // ---------------------------------------------------------------------------
 
 let joinCounter = 0;
+
+// ---------------------------------------------------------------------------
+// Phase 10.7 authenticated test identity.
+// ---------------------------------------------------------------------------
+
+/** One registered test user per displayName, cached process-wide. */
+const testUsers = new Map<string, { userId: string; accessToken: string; email: string }>();
+let testUserCounter = 0;
+
+function resolveHelperApp(explicit?: FastifyInstance): FastifyInstance {
+  const app = explicit ?? openApps[openApps.length - 1] ?? current?.app;
+  if (!app) throw new Error("no test app available for authenticated helper");
+  return app;
+}
+
+/**
+ * Register (once per displayName) and return credentials usable on ANY test
+ * instance: users are global (shared test DB) and tokens verify everywhere
+ * via TEST_AUTH_ACCESS_SECRET. Password is a fixed test secret — these are
+ * throwaway rows, never real credentials.
+ */
+export async function registerTestUser(
+  displayName: string,
+  app?: FastifyInstance,
+): Promise<{ userId: string; accessToken: string; email: string }> {
+  const cached = testUsers.get(displayName);
+  if (cached) return cached;
+  testUserCounter += 1;
+  // Random suffix: some suites run without resetDatabase() between tests, so
+  // the counter alone can repeat an email across a file boundary (409).
+  const email = `testuser-${testUserCounter}-${Math.random().toString(36).slice(2, 10)}@test.local`;
+  const target = resolveHelperApp(app);
+  const response = await target.inject({
+    method: "POST",
+    url: "/auth/register",
+    payload: JSON.stringify({ email, password: "test-password-12", displayName }),
+    headers: { "content-type": "application/json" },
+  });
+  if (response.statusCode !== 201) {
+    throw new Error(
+      `test user registration failed: ${response.statusCode} ${response.body.slice(0, 200)}`,
+    );
+  }
+  const body = response.json() as any;
+  const entry = { userId: body.user.id as string, accessToken: body.accessToken as string, email };
+  testUsers.set(displayName, entry);
+  return entry;
+}
+
+/** Bearer headers for an access token (session creation etc.). */
+export function bearerHeaders(accessToken: string): Record<string, string> {
+  return { authorization: `Bearer ${accessToken}` };
+}
+
+/**
+ * Phase 10.7: create a session as an authenticated user (POST /sessions
+ * requires a token; creator comes from the token subject). Response shape
+ * is unchanged from the legacy endpoint (session + teacherParticipant).
+ */
+export async function createAuthedSession(
+  app: FastifyInstance,
+  name: string,
+  accessToken: string,
+): Promise<{ statusCode: number; body: any }> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/sessions",
+    payload: JSON.stringify({ name }),
+    headers: { "content-type": "application/json", ...bearerHeaders(accessToken) },
+  });
+  return { statusCode: response.statusCode, body: response.json() as any };
+}
+
+/**
+ * Phase 10.7: register a fresh test user and create a session owned by it.
+ * The creator identity is the returned `creatorDisplayName`, which callers
+ * pass to `joinAs(...)` — the shared identity cache resolves it to the SAME
+ * registered user, so the join binds the TEACHER participant. Retires the
+ * old anonymous auto-provisioned creator path in tests.
+ */
+export async function registerAndCreateSession(
+  app: FastifyInstance,
+  name: string,
+  displayName?: string,
+): Promise<{
+  sessionId: string;
+  creatorUserId: string;
+  creatorDisplayName: string;
+  accessToken: string;
+}> {
+  const creatorDisplayName = displayName ?? `Teacher-${Math.random().toString(36).slice(2, 10)}`;
+  const identity = await registerTestUser(creatorDisplayName, app);
+  const response = await app.inject({
+    method: "POST",
+    url: "/sessions",
+    payload: JSON.stringify({ name }),
+    headers: { "content-type": "application/json", ...bearerHeaders(identity.accessToken) },
+  });
+  if (response.statusCode !== 201) {
+    throw new Error(`session create failed: ${response.statusCode} ${response.body.slice(0, 200)}`);
+  }
+  const body = response.json() as any;
+  return {
+    sessionId: body.session.id as string,
+    creatorUserId: body.session.creator.id as string,
+    creatorDisplayName: body.session.creator.displayName as string,
+    accessToken: identity.accessToken,
+  };
+}
 
 export interface QuizScenario {
   sessionId: string;
@@ -350,10 +517,17 @@ export async function createLiveQuizScenario(
       : { correctAnswer, firstCorrectWins: options.firstCorrectWins ?? true };
 
   const teacherDisplayName = `Teacher-${Math.random().toString(36).slice(2, 10)}`;
-  const created = await request("POST", "/sessions", {
-    name: `Scenario ${Date.now()}`,
-    creator: { displayName: teacherDisplayName },
-  });
+  // Phase 10.7: creation requires authentication — the registered teacher
+  // owns the session (no client-supplied creator identity remains).
+  const teacher = await registerTestUser(teacherDisplayName);
+  const created = await request(
+    "POST",
+    "/sessions",
+    {
+      name: `Scenario ${Date.now()}`,
+    },
+    bearerHeaders(teacher.accessToken),
+  );
   if (created.statusCode !== 201) throw new Error(`session create failed: ${created.statusCode}`);
   const sessionId = created.body.session.id as string;
 
@@ -386,7 +560,10 @@ export async function createLiveQuizScenario(
 }
 
 /**
- * Join a session over WS (optionally binding a participant) and await the ack.
+ * Join a session over WS and await the ack. Phase 10.7: with a displayName,
+ * authenticates first (registered test user) and joins WITHOUT any identity
+ * payload — the server resolves the participant by (sessionId, userId).
+ * Without a displayName the join is view-only (no participant bound).
  * Returns the full session.joined payload; `recovery` is the Phase 5 snapshot
  * (null when the session has no quizzes yet). Consumes exactly one
  * session.joined frame, so callers can drain afterwards and assert that no
@@ -396,6 +573,7 @@ export async function joinAs(
   client: WsTestClient,
   sessionId: string,
   displayName?: string,
+  app?: FastifyInstance,
 ): Promise<{
   participantId: string | null;
   role: string | null;
@@ -403,13 +581,21 @@ export async function joinAs(
   recovery: unknown;
 }> {
   const requestId = `join-${++joinCounter}`;
+  if (displayName !== undefined) {
+    const identity = await registerTestUser(displayName, app);
+    client.send({
+      type: "auth.authenticate",
+      requestId: `auth-${requestId}`,
+      payload: { token: identity.accessToken },
+    });
+    await client.waitFor(
+      (m) => m.type === "auth.authenticated" && m.requestId === `auth-${requestId}`,
+    );
+  }
   client.send({
     type: "session.join",
     requestId,
-    payload: {
-      sessionId,
-      ...(displayName === undefined ? {} : { participant: { displayName } }),
-    },
+    payload: { sessionId },
   });
   const joined = await client.waitFor(
     (m) => m.type === "session.joined" && m.requestId === requestId,

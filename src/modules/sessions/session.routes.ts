@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import { SessionRepository } from "./session.repository.js";
@@ -12,7 +11,7 @@ import { QuizRepository } from "../quizzes/quiz.repository.js";
 import { serializeQuiz } from "../quizzes/quiz.serializer.js";
 import { NotFoundError } from "../../shared/errors.js";
 import type { TokenService } from "../auth/token.service.js";
-import { createOptionalAuthenticatePreHandler } from "../auth/authenticate.js";
+import { createAuthenticatePreHandler } from "../auth/authenticate.js";
 
 export interface SessionRoutesOptions {
   prisma: PrismaClient;
@@ -25,56 +24,27 @@ export async function sessionRoutes(
 ): Promise<void> {
   const sessions = new SessionRepository(options.prisma);
   const quizzes = new QuizRepository(options.prisma);
-  const tryAuthenticate = createOptionalAuthenticatePreHandler(options.tokens);
+  const authenticate = createAuthenticatePreHandler(options.tokens);
 
-  app.post("/sessions", { preHandler: tryAuthenticate }, async (request, reply) => {
+  app.post("/sessions", { preHandler: authenticate }, async (request, reply) => {
     const body = createSessionSchema.parse(request.body);
 
-    // Phase 10.6 ownership: an authenticated creator owns the session via
-    // their verified userId (body.creator is ignored — identity comes from
-    // the token, mirroring WS join precedence). Anonymous callers keep the
-    // legacy auto-provisioned creator path unchanged.
-    if (request.user !== undefined) {
-      const creator = await options.prisma.user.findUnique({
-        where: { id: request.user.id },
-      });
-      if (creator === null) {
-        const error = new Error("Authentication required") as Error & { statusCode?: number };
-        error.statusCode = 401;
-        throw error;
-      }
-      const { session, teacherParticipant } = await sessions.createWithExistingCreator({
-        name: body.name,
-        creatorId: creator.id,
-      });
-      reply.code(201);
-      return {
-        session: {
-          id: session.id,
-          name: session.name,
-          state: session.state,
-          startedAt: session.startedAt?.toISOString() ?? null,
-          endedAt: session.endedAt?.toISOString() ?? null,
-          createdAt: session.createdAt.toISOString(),
-          updatedAt: session.updatedAt.toISOString(),
-          creator: { id: creator.id, displayName: creator.displayName },
-        },
-        teacherParticipant: {
-          id: teacherParticipant.id,
-          role: teacherParticipant.role,
-          userId: creator.id,
-          joinedAt: teacherParticipant.joinedAt.toISOString(),
-        },
-      };
-    }
-
-    const { session, creatorUser, teacherParticipant } = await sessions.createWithCreator({
-      name: body.name,
-      // Unique globally (users.displayName) — suffix a short random tail to
-      // keep auto-provisioned creators collision-free (Phase 3 identity seam).
-      creatorDisplayName: body.creator?.displayName ?? `Teacher-${randomUUID().slice(0, 8)}`,
+    // Phase 10.7: session creation requires authentication. The creator is
+    // the verified token subject — there is no client-supplied identity left
+    // (body.creator was removed from the schema). Legacy anonymous creation
+    // is gone; historical sessions remain valid rows.
+    const creator = await options.prisma.user.findUnique({
+      where: { id: request.user?.id ?? "" },
     });
-
+    if (creator === null) {
+      const error = new Error("Authentication required") as Error & { statusCode?: number };
+      error.statusCode = 401;
+      throw error;
+    }
+    const { session, teacherParticipant } = await sessions.createWithExistingCreator({
+      name: body.name,
+      creatorId: creator.id,
+    });
     reply.code(201);
     return {
       session: {
@@ -85,12 +55,12 @@ export async function sessionRoutes(
         endedAt: session.endedAt?.toISOString() ?? null,
         createdAt: session.createdAt.toISOString(),
         updatedAt: session.updatedAt.toISOString(),
-        creator: { id: creatorUser.id, displayName: creatorUser.displayName },
+        creator: { id: creator.id, displayName: creator.displayName },
       },
       teacherParticipant: {
         id: teacherParticipant.id,
         role: teacherParticipant.role,
-        userId: creatorUser.id,
+        userId: creator.id,
         joinedAt: teacherParticipant.joinedAt.toISOString(),
       },
     };

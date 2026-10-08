@@ -49,7 +49,7 @@ recompute the union.
 **4. Process-local truth + a distributed Redis registry** with leases/heartbeat
 keys. Rejected as a needless second consistency mechanism: it introduces its
 own TTL semantics, key naming, and reconciliation logic, for the same eventual
-answer option 3 already gives — and it puts presence *state* (not just
+answer option 3 already gives — and it puts presence _state_ (not just
 notices) back into Redis.
 
 ## Decision
@@ -115,9 +115,9 @@ connection counts in the durable model.
   the "replace this instance's set" model needs.
 - **Graceful shutdown is best-effort.** It publishes an empty set before Redis
   closes; if Redis is already gone, peers fall back to the staleness window.
-- **Identity is still the displayName seam.** Presence reports the participant
-  the connection bound to, inheriting the Phase 3 limitation that a name is not
-  a credential.
+- **Identity is authenticated (Phase 10.7).** Presence reports the participant
+  the connection bound to, resolved from the authenticated `(sessionId,
+userId)` membership — `displayName` is a presentation label only.
 
 ## Consequences
 

@@ -21,9 +21,7 @@ export const wsMessagesSent = new Counter("ws_messages_sent");
 
 // Warm-up: 10 VUs, 30 seconds.
 export const options = {
-  stages: [
-    { duration: "30s", target: 10 },
-  ],
+  stages: [{ duration: "30s", target: 10 }],
   thresholds: {
     // provisional only; no performance target asserted in 8.1
     ws_duration_ms: ["p(95)<1000"],
@@ -49,9 +47,12 @@ export default function () {
       JSON.stringify({
         type: "session.join",
         requestId: `vu-${__VU}-${__ITER}`,
+        // View-only join: Phase 10.7 removed the displayName identity field,
+        // and this scenario measures connection/message throughput — it binds
+        // no participant. (An authenticated join would send auth.authenticate
+        // with an access token first.)
         payload: {
           sessionId: "00000000-0000-0000-0000-000000000000", // must exist; run with a live test stack
-          participant: { displayName: `VU-${__VU}` },
         },
       }),
     );

@@ -284,15 +284,13 @@ describe("HTTP authentication (Phase 10.4)", () => {
       const bad = await post("/sessions", { name: `Bad ${stamp()}` }, "bogus-token");
       expect(bad.statusCode).toBe(401);
 
-      // Absent token keeps the legacy auto-provisioned path byte-identical.
-      const legacy = await post("/sessions", {
+      // Absent token: the legacy anonymous auto-provisioned creator path is
+      // retired (Phase 10.7) — creation is 401, never a silent identity mint.
+      const anon = await post("/sessions", {
         name: `Legacy ${stamp()}`,
         creator: { displayName: `LegacyCreator-${stamp()}` },
       });
-      expect(legacy.statusCode).toBe(201);
-      expect(legacy.body.session.creator.id).not.toBe(userId);
-      madeUsers.push(legacy.body.session.creator.id as string);
-      madeSessions.push(legacy.body.session.id as string);
+      expect(anon.statusCode).toBe(401);
     } finally {
       await stop();
     }

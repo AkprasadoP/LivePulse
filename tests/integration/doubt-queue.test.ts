@@ -6,6 +6,7 @@ import {
   startIndependentInstance,
   connectToInstance,
   joinAs,
+  registerAndCreateSession,
   waitForAsync,
   type IndependentInstance,
 } from "./helpers.js";
@@ -42,13 +43,12 @@ async function makeLiveSession(instance: IndependentInstance): Promise<{
     return { statusCode: response.statusCode, body };
   };
 
-  const created = await request("POST", "/sessions", {
-    name: `Doubt ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-  });
-  expect(created.statusCode).toBe(201);
-  const sessionId = created.body.session.id as string;
-  const teacherName = created.body.session.creator.displayName as string;
+  // Phase 10.7: creation requires an authenticated owner; the registered
+  // creator identity (teacherName) is reused by joinAs at the call sites.
+  const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
+    instance.app,
+    `Doubt ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  );
   const live = await request("POST", `/sessions/${sessionId}/state`, { state: "LIVE" });
   expect(live.statusCode).toBe(200);
   return { sessionId, teacherName };
@@ -387,12 +387,10 @@ describe("Doubt queue (integration, Phase 6)", () => {
       });
       return { statusCode: response.statusCode, body: response.json() as any };
     };
-    const created = await request("POST", "/sessions", {
-      name: `NotLive ${Date.now()}`,
-      creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-    });
-    const sessionId = created.body.session.id as string;
-    const teacherName = created.body.session.creator.displayName as string;
+    const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
+      wsA.app,
+      `NotLive ${Date.now()}`,
+    );
 
     const teacher = await connectToInstance(wsA);
     await joinAs(teacher, sessionId, teacherName);

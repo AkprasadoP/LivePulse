@@ -46,22 +46,21 @@ closing the TCP connection before the handshake.
 
 ## POST /sessions
 
-Creates a session and auto-provisions its creator as the first `TEACHER`
-participant (no authentication exists yet — approved Phase 1 decision).
+Creates a session. **Requires authentication** (`Authorization: Bearer
+<access-token>`): the creator is the token subject, and that user is added as
+the first `TEACHER` participant. There is no client-supplied creator identity
+(the Phase 3 `creator.displayName` auto-provisioning seam is retired).
 
 **Request**
 
 ```json
 {
-  "name": "Physics — Current Electricity",
-  "creator": { "displayName": "Dr. Ohm" }
+  "name": "Physics — Current Electricity"
 }
 ```
 
 - `name`: string, 1–200 chars, required
-- `creator.displayName`: string, 1–100 chars, optional. Phase 3 identity
-  seam: `users.displayName` is globally unique, so the default is a random,
-  collision-free `Teacher-xxxxxxxx`, not a fixed name.
+- no `creator` field — identity comes from the access token, never the body
 
 **Response — 201**
 
@@ -86,7 +85,8 @@ participant (no authentication exists yet — approved Phase 1 decision).
 }
 ```
 
-**Errors:** 400 (missing/empty/too-long `name`, malformed JSON).
+**Errors:** 400 (missing/empty/too-long `name`, malformed JSON); 401 (missing
+or invalid access token).
 
 ---
 
@@ -245,8 +245,8 @@ Returns the quiz with its questions ordered by `position`.
 
 ## Not implemented (by design)
 
-Authentication/auth headers, joining via HTTP (participants bind over the
-WebSocket identity seam), doubt endpoints, presence. Quiz/question state
+Joining via HTTP (participants bind over the WebSocket after
+`auth.authenticate`), doubt endpoints, presence. Quiz/question state
 transitions and answers are WS-only by design — real-time classroom events
 belong on the real-time channel; HTTP remains the control plane for
 durable/curatorial operations (create session/quiz, move session state).

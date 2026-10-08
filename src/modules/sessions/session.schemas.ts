@@ -6,12 +6,8 @@ export const sessionIdParamsSchema = z.object({
 
 export const createSessionSchema = z.object({
   name: z.string().min(1).max(200),
-  // No authentication yet: the creator is auto-provisioned (approved decision).
-  creator: z
-    .object({
-      displayName: z.string().min(1).max(100),
-    })
-    .optional(),
+  // Phase 10.7: no client-supplied creator identity. The creator is the
+  // authenticated token subject (route-level), never request input.
 });
 
 export const sessionStateTransitionSchema = z.object({

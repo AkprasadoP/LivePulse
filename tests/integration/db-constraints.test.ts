@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Prisma } from "@prisma/client";
-import { startTestApp, stopTestApp, resetDatabase, type IntegrationContext } from "./helpers.js";
+import {
+  startTestApp,
+  stopTestApp,
+  resetDatabase,
+  registerAndCreateSession,
+  type IntegrationContext,
+} from "./helpers.js";
 
 describe("Database constraints (integration, real PostgreSQL)", () => {
   let ctx: IntegrationContext;
@@ -18,8 +24,8 @@ describe("Database constraints (integration, real PostgreSQL)", () => {
   });
 
   async function seedSessionWithQuiz() {
-    const sessionId = (await ctx.request("POST", "/sessions", { name: "Constraint session" })).body
-      .session.id;
+    // Phase 10.7: creation requires an authenticated owner (token subject).
+    const { sessionId } = await registerAndCreateSession(ctx.app, "Constraint session");
 
     const quiz = await ctx.prisma.quiz.create({
       data: { sessionId, title: "Constraint quiz" },
@@ -145,10 +151,9 @@ describe("Database constraints (integration, real PostgreSQL)", () => {
   });
 
   it("restricts deletion of a user who created a session", async () => {
-    const { body } = await ctx.request("POST", "/sessions", { name: "Keeper" });
-    const creatorId = body.session.creator.id;
+    const { creatorUserId } = await registerAndCreateSession(ctx.app, "Keeper");
 
-    await expect(ctx.prisma.user.delete({ where: { id: creatorId } })).rejects.toSatisfy(
+    await expect(ctx.prisma.user.delete({ where: { id: creatorUserId } })).rejects.toSatisfy(
       (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2003",
     );
   });

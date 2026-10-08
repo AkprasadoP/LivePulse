@@ -16,6 +16,15 @@ describe("Session state machine", () => {
     await resetDatabase();
   });
 
+  // Phase 10.7: sessions are created for existing users (no auto-provisioning).
+  async function createSessionForTest(name: string) {
+    const user = await ctx.prisma.user.create({
+      data: { displayName: `State-${Date.now()}-${Math.floor(Math.random() * 1e6)}` },
+    });
+    const { session } = await sessions.createWithExistingCreator({ name, creatorId: user.id });
+    return { session };
+  }
+
   afterAll(async () => {
     await stopTestApp();
   });
@@ -36,10 +45,7 @@ describe("Session state machine", () => {
   });
 
   it("sets startedAt on LIVE and endedAt on ENDED, preserving startedAt", async () => {
-    const { session } = await sessions.createWithCreator({
-      name: "Timestamps",
-      creatorDisplayName: "T",
-    });
+    const { session } = await createSessionForTest("Timestamps");
 
     const live = await sessions.transitionState(session.id, "LIVE");
     expect(live.startedAt).not.toBeNull();
@@ -51,10 +57,7 @@ describe("Session state machine", () => {
   });
 
   it("throws InvalidStateTransitionError for ENDED -> LIVE", async () => {
-    const { session } = await sessions.createWithCreator({
-      name: "Dead end",
-      creatorDisplayName: "T",
-    });
+    const { session } = await createSessionForTest("Dead end");
     await sessions.transitionState(session.id, "ENDED");
 
     await expect(sessions.transitionState(session.id, "LIVE")).rejects.toMatchObject({
@@ -71,10 +74,7 @@ describe("Session state machine", () => {
   });
 
   it("survives concurrent duplicate transitions with exactly one winner", async () => {
-    const { session } = await sessions.createWithCreator({
-      name: "Race",
-      creatorDisplayName: "T",
-    });
+    const { session } = await createSessionForTest("Race");
 
     // Simultaneous identical transitions: the check-and-set UPDATE makes one
     // succeed; losers see the state already changed.
@@ -97,10 +97,7 @@ describe("Session state machine", () => {
   });
 
   it("rejects conflicting concurrent transitions cleanly (LIVE vs ENDED race)", async () => {
-    const { session } = await sessions.createWithCreator({
-      name: "Conflict race",
-      creatorDisplayName: "T",
-    });
+    const { session } = await createSessionForTest("Conflict race");
 
     const results = await Promise.allSettled([
       sessions.transitionState(session.id, "LIVE"),

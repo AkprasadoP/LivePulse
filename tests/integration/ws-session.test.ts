@@ -2,7 +2,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import net from "node:net";
 import { once } from "node:events";
 import type { FastifyInstance } from "fastify";
-import type { PrismaClient } from "@prisma/client";
 import WebSocket from "ws";
 import {
   startListeningServer,
@@ -12,6 +11,7 @@ import {
   WsTestClient,
   waitFor,
   TEST_DATABASE_URL,
+  registerAndCreateSession,
 } from "./helpers.js";
 import { loadConfig } from "../../src/config/index.js";
 import { buildApp } from "../../src/app/app.js";
@@ -24,12 +24,10 @@ import { buildApp } from "../../src/app/app.js";
  */
 describe("WebSocket session behavior (integration)", () => {
   let app: FastifyInstance;
-  let prisma: PrismaClient;
 
   beforeAll(async () => {
     const server = await startListeningServer();
     app = server.app;
-    prisma = server.prisma;
   });
 
   afterAll(async () => {
@@ -41,14 +39,11 @@ describe("WebSocket session behavior (integration)", () => {
   });
 
   async function createSession(name: string): Promise<string> {
-    const response = await app.inject({
-      method: "POST",
-      url: "/sessions",
-      payload: JSON.stringify({ name }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(response.statusCode).toBe(201);
-    return (response.json() as { session: { id: string } }).session.id;
+    // Phase 10.7: creation requires authentication. resetDatabase() wipes user
+    // rows before every test, so each call registers a fresh owner (a token
+    // minted in beforeAll would point at a truncated row).
+    const { sessionId } = await registerAndCreateSession(app, name);
+    return sessionId;
   }
 
   async function startSession(sessionId: string): Promise<void> {

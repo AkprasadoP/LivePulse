@@ -6,6 +6,7 @@ import {
   startIndependentInstance,
   connectToInstance,
   joinAs,
+  registerAndCreateSession,
   waitForAsync,
   WsTestClient,
   type IndependentInstance,
@@ -107,13 +108,12 @@ async function makeScenario(instance: IndependentInstance): Promise<Scenario> {
   const request = requestOn(instance);
   // Non-hex correct answer so no-leak assertions cannot collide with UUIDs.
   const correctAnswer = "Berlin";
-  const created = await request("POST", "/sessions", {
-    name: `Recovery ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-  });
-  expect(created.statusCode).toBe(201);
-  const sessionId = created.body.session.id as string;
-  const teacherName = created.body.session.creator.displayName as string;
+  // Phase 10.7: creation requires an authenticated owner; the registered
+  // creator identity (teacherName) is reused by joinAs below.
+  const { sessionId, creatorDisplayName: teacherName } = await registerAndCreateSession(
+    instance.app,
+    `Recovery ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  );
 
   const quizResponse = await request("POST", `/sessions/${sessionId}/quizzes`, {
     title: "Recovery quiz",
@@ -647,12 +647,10 @@ describe("Recovery edge cases (integration, Phase 5)", () => {
 
   it("recovery is null before any quiz exists; DRAFT questions never appear in the snapshot", async () => {
     const request = requestOn(wsA);
-    const created = await request("POST", "/sessions", {
-      name: `Edge ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-    });
-    expect(created.statusCode).toBe(201);
-    const sessionId = created.body.session.id as string;
+    const { sessionId } = await registerAndCreateSession(
+      wsA.app,
+      `Edge ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    );
 
     const client = await connectToInstance(wsA);
     const joined = await joinAs(client, sessionId);
@@ -679,11 +677,10 @@ describe("Recovery edge cases (integration, Phase 5)", () => {
 
   it("view-only joins get a snapshot without ownAnswer", async () => {
     const request = requestOn(wsA);
-    const created = await request("POST", "/sessions", {
-      name: `View ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      creator: { displayName: `Teacher-${Math.random().toString(36).slice(2, 10)}` },
-    });
-    const sessionId = created.body.session.id as string;
+    const { sessionId } = await registerAndCreateSession(
+      wsA.app,
+      `View ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    );
     await request("POST", `/sessions/${sessionId}/quizzes`, {
       title: "Viewed quiz",
       questions: [{ prompt: "Q", correctAnswer: "42" }],

@@ -47,19 +47,19 @@ Structural guarantees that would be expensive to discover in production:
 
 ## Integration scenarios (11)
 
-| #   | Scenario                                      | What it proves                                                                                        |
-| --- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| O1  | exposition validity                           | `200`, `text/plain`, ≥30 families, every `# TYPE` preceded by `# HELP`, only counter/gauge/histogram  |
-| O2  | connection lifecycle                          | active gauge 0 → 1 → 0 around a real socket; `opened_total` and `closed_total{reason="client"}` track it, `reason="heartbeat"` stays 0 |
-| O3  | frame counters                                | inbound and outbound message counters advance on a real join                                          |
-| O4  | histograms record observations                | handler duration, DB operation duration, recovery duration/builds all observed on the join path       |
-| O5  | session counters                              | joins labelled by role (`TEACHER` vs `viewer`), sessions-with-connections gauge tracks 1 → 0, leaves labelled `disconnect` |
-| O6  | quiz / doubt / recovery instrumentation       | quiz transitions, answers, doubt create + resolve and their durations all increment exactly once      |
-| O7  | protocol errors                               | one rejected event produces exactly one `ws_protocol_errors_total{code="UNSUPPORTED_EVENT"}` series   |
-| O8  | bounded labels in a live instance             | after real session/doubt traffic, every label in the exposition is in the allowlist and no id appears (including the concrete `sessionId`/`questionId` that flowed through) |
-| O9  | no dependencies                               | `/metrics` still returns 200 after the instance's PostgreSQL client is disconnected                    |
-| O10 | disabled mode                                 | `METRICS_ENABLED=false` → `app.metrics === null`, `/metrics` 404, `/health` still 200                 |
-| O11 | log hygiene + correlation                     | with a real quiz flow: every line is JSON carrying `instanceId`; join/close lines present; **no** correct answer, no submitted answer content, no `DATABASE_URL`/`REDIS_URL` |
+| #   | Scenario                                | What it proves                                                                                                                                                               |
+| --- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| O1  | exposition validity                     | `200`, `text/plain`, ≥30 families, every `# TYPE` preceded by `# HELP`, only counter/gauge/histogram                                                                         |
+| O2  | connection lifecycle                    | active gauge 0 → 1 → 0 around a real socket; `opened_total` and `closed_total{reason="client"}` track it, `reason="heartbeat"` stays 0                                       |
+| O3  | frame counters                          | inbound and outbound message counters advance on a real join                                                                                                                 |
+| O4  | histograms record observations          | handler duration, DB operation duration, recovery duration/builds all observed on the join path                                                                              |
+| O5  | session counters                        | joins labelled by role (`TEACHER` vs `viewer`), sessions-with-connections gauge tracks 1 → 0, leaves labelled `disconnect`                                                   |
+| O6  | quiz / doubt / recovery instrumentation | quiz transitions, answers, doubt create + resolve and their durations all increment exactly once                                                                             |
+| O7  | protocol errors                         | one rejected event produces exactly one `ws_protocol_errors_total{code="UNSUPPORTED_EVENT"}` series                                                                          |
+| O8  | bounded labels in a live instance       | after real session/doubt traffic, every label in the exposition is in the allowlist and no id appears (including the concrete `sessionId`/`questionId` that flowed through)  |
+| O9  | no dependencies                         | `/metrics` still returns 200 after the instance's PostgreSQL client is disconnected                                                                                          |
+| O10 | disabled mode                           | `METRICS_ENABLED=false` → `app.metrics === null`, `/metrics` 404, `/health` still 200                                                                                        |
+| O11 | log hygiene + correlation               | with a real quiz flow: every line is JSON carrying `instanceId`; join/close lines present; **no** correct answer, no submitted answer content, no `DATABASE_URL`/`REDIS_URL` |
 
 Stability: these 11 tests plus the 13 presence tests were run **3 consecutive
 times** with 24/24 passing each run.
@@ -99,17 +99,17 @@ times** with 24/24 passing each run.
 
 ## Coverage against the Phase 7 requirements
 
-| Required observability test                             | Covered by                      |
-| ------------------------------------------------------- | ------------------------------- |
-| `/metrics` returns valid Prometheus text                | O1                              |
-| connection counters increment                           | O2                              |
-| active connection gauge tracks current state            | O2, O5                          |
-| message counters increment                              | O3                              |
-| operation histograms record observations                | O4, O6                          |
-| Redis publish failures increment the correct metric     | unit tests (metric wiring) + O3/O4 exercise the same registry; publish `result` labels asserted in `docs/architecture/observability.md` §3 |
-| recovery failures increment the correct metric          | O4 (`recovery_builds_total{result="ok"}`) and the `error` branch is exercised by recovery's degradation path |
-| doubt/quiz operation metrics increment                  | O6                              |
-| metric labels remain bounded                            | unit tests + O8                 |
-| no sensitive payload data appears in logs               | O11                             |
-| metrics endpoint does not depend on Redis/PostgreSQL     | O9 (+ no Redis call in the handler) |
-| existing Phase 1–6 tests remain green                   | full `pnpm test:integration` run |
+| Required observability test                          | Covered by                                                                                                                                 |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/metrics` returns valid Prometheus text             | O1                                                                                                                                         |
+| connection counters increment                        | O2                                                                                                                                         |
+| active connection gauge tracks current state         | O2, O5                                                                                                                                     |
+| message counters increment                           | O3                                                                                                                                         |
+| operation histograms record observations             | O4, O6                                                                                                                                     |
+| Redis publish failures increment the correct metric  | unit tests (metric wiring) + O3/O4 exercise the same registry; publish `result` labels asserted in `docs/architecture/observability.md` §3 |
+| recovery failures increment the correct metric       | O4 (`recovery_builds_total{result="ok"}`) and the `error` branch is exercised by recovery's degradation path                               |
+| doubt/quiz operation metrics increment               | O6                                                                                                                                         |
+| metric labels remain bounded                         | unit tests + O8                                                                                                                            |
+| no sensitive payload data appears in logs            | O11                                                                                                                                        |
+| metrics endpoint does not depend on Redis/PostgreSQL | O9 (+ no Redis call in the handler)                                                                                                        |
+| existing Phase 1–6 tests remain green                | full `pnpm test:integration` run                                                                                                           |
