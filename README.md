@@ -170,6 +170,12 @@ Full design, migration workflow, verification log and limits:
 `docs/architecture/production.md`. Single instance only — Nginx, replicas,
 TLS and auth arrive in later phases.
 
+Phase 9.2 adds Nginx (`nginx/nginx.conf`, single upstream, no balancing)
+as the operator entrypoint on 127.0.0.1:3200; it proxies both HTTP and
+the raw WebSocket upgrade (verified: session create/GET plus
+`session.join` → `session.joined` through the proxy; plain `GET /ws`
+still 426). Direct app access on :3100 stays for comparison.
+
 ## Health check
 
 ```bash

@@ -80,5 +80,26 @@ services:
     # SIGTERM must reach Node with time for in-flight requests + WS teardown.
     stop_grace_period: 30s
 
+  nginx:
+    image: nginx:1.28-alpine
+    container_name: livepulse-nginx-prod
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      # The only operator-facing entrypoint going forward (127.0.0.1:3200).
+      # Direct app access (:3100) stays during 9.2 so proxied vs direct
+      # behavior can be compared; later phases may remove it.
+      - "127.0.0.1:3200:80"
+    healthcheck:
+      # nginx:alpine ships wget (no curl): HEAD /health through the proxy.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
 volumes:
   postgres-prod-data:

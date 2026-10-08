@@ -71,6 +71,34 @@ create + GET roundtrip; `livepulse_redis_connected{publisher,subscriber}
 shows `SIGTERM → Graceful shutdown complete`; restart returns `/health` 200. Development data was never touched (dev volume `4 users / 3 sessions
 / 1 quiz` intact; dev stack recreated with `docker compose up -d`).
 
+## Reverse proxy — Phase 9.2 (single upstream, no balancing)
+
+`nginx/nginx.conf` fronts the app; `nginx` service (`nginx:1.28-alpine`,
+127.0.0.1:3200 → 80, config mounted read-only) starts after the app is
+healthy. Exactly one `server` in the upstream — no `ip_hash`, no sticky
+logic: stickiness would hide the cross-instance behavior Phase 9.3 exists
+to demonstrate (client on App-1 and client on App-2 seeing the same
+session events via Redis propagation + PG recovery).
+
+- HTTP passes through with `Host`/`X-Real-IP`/`X-Forwarded-For`/
+  `X-Forwarded-Proto` preserved; `proxy_http_version 1.1` + keepalive 32
+  upstream.
+- WebSocket uses the standard `map $http_upgrade` → `Upgrade`/`close`
+  switch: plain requests are unaffected, real upgrades handshake through.
+  No path-based WS special-casing, so the app's own 426 for non-upgrade
+  `GET /ws` passes through byte-identical (verified: 426 direct and via
+  proxy).
+- Timeouts: `proxy_read/send_timeout 120s` against the app's 30 s WS
+  heartbeat (each frame resets Nginx's timer) — 4× headroom without
+  masking a dead upstream.
+- Nginx healthcheck uses the image's `wget` against `/health` through the
+  proxy itself, so a healthy nginx implies a working proxy path.
+
+Verified: `POST /sessions` + `GET /sessions/:id` via :3200; WS
+`session.join` → `session.joined` (matching `requestId`) via
+`ws://127.0.0.1:3200/ws`; direct `:3100` kept during 9.2 for
+proxied-vs-direct comparison. No app, schema, pool, or PG change.
+
 ## Limits (for later phases)
 
 Single app instance; no Nginx/load balancing; no TLS/auth/rate limiting;
