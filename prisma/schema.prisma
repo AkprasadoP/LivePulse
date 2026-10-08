@@ -45,14 +45,59 @@ enum DoubtStatus {
 /// displayName IS unique: the Phase 3 development identity seam resolves a
 /// connection to a stable user by name (see docs/decisions/002 + Phase 3 docs).
 model User {
-  id        String   @id @default(uuid(7))
-  displayName String @unique @db.VarChar(100)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  id          String   @id @default(uuid(7))
+  displayName String   @unique @db.VarChar(100)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
 
-  createdSessions       Session[]             @relation("SessionCreator")
+  createdSessions       Session[]            @relation("SessionCreator")
   sessionParticipations SessionParticipant[]
+  credentials           Credential?
+  authSessions          AuthSession[]
 
   @@map("users")
+}
+
+/// Email + password login identity (Phase 10.2).
+///
+/// Separate table (not nullable columns on User) so pre-auth users remain
+/// naturally credential-less: existing Phase 1–9 rows are untouched and
+/// simply cannot authenticate until claimed. Email is canonicalized in
+/// application code (trim + lowercase on both write and lookup paths)
+/// because the unique index is case-sensitive.
+model Credential {
+  id           String   @id @default(uuid(7))
+  userId       String   @unique
+  email        String   @unique @db.VarChar(320)
+  passwordHash String   @db.Text
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("credentials")
+}
+
+/// Server-side refresh-token session (Phase 10.2).
+///
+/// Only the sha256 hash of the refresh token is stored (the token itself is
+/// shown to the client once). Rotation links the replacement to its
+/// predecessor via rotatedFromId; a presented token hashing to an already
+/// revokedAt session signals reuse. Revocation never touches the User row:
+/// deleting a user removes their sessions (Cascade) while credential
+/// deletion cannot cascade into history (Restrict on Credential).
+model AuthSession {
+  id               String    @id @default(uuid(7))
+  userId           String
+  refreshTokenHash String    @unique
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  expiresAt        DateTime  @db.Timestamptz(6)
+  revokedAt        DateTime? @db.Timestamptz(6)
+  rotatedFromId    String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("auth_sessions")
 }
 
 /// A live classroom with an explicit lifecycle:
@@ -199,9 +244,9 @@ model Doubt {
 
   participant SessionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
 
+  @@unique([sessionId, enqueueSeq])
   /// The queue read: OPEN doubts of a session in canonical order.
   @@index([sessionId, status, priority(sort: Desc), enqueueSeq(sort: Asc)])
-  @@unique([sessionId, enqueueSeq])
   @@index([participantId])
   @@map("doubts")
 }
