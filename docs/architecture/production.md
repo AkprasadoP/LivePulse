@@ -1,8 +1,11 @@
-# Production deployment — Phase 9.1 (single container)
+# Production deployment — Phase 9 (containers, proxy, instances, recovery)
 
-How LivePulse runs as a reproducible production-style container. No
-business logic, schema, pool, or PostgreSQL setting differs from
-development — only packaging and wiring.
+How LivePulse runs as a reproducible production-style deployment: container
+image (9.1), Nginx reverse proxy (9.2), two app instances (9.3), instance
+failure + recovery (9.4), readiness (9.5), graceful draining (9.6), failure
+matrix (9.7). No business logic, schema, pool, or PostgreSQL setting
+differs from development — only packaging, wiring, and the explicitly
+noted readiness/drain additions.
 
 ## Image (`Dockerfile`, multi-stage)
 
@@ -28,8 +31,8 @@ development — only packaging and wiring.
 
 ## Compose (`docker-compose.prod.yml`, project `livepulse-prod`)
 
-One app container plus Postgres 17 / Redis 7. The dev file
-(`docker-compose.yml`) is untouched; `name: livepulse-prod` isolates the
+One app container plus Postgres 17 / Redis 7 at 9.1; a second identical
+app container since 9.3. The dev file (`docker-compose.yml`) is untouched; `name: livepulse-prod` isolates the
 two projects after an observed incident where a same-project `down`
 removed the dev containers (volumes — and data — survived).
 
@@ -37,7 +40,8 @@ removed the dev containers (volumes — and data — survived).
 | ---------- | --------------- | --------------------- | --------------------------------------------------------------------------------- |
 | `postgres` | `postgres:5432` | `5434`                | durable source of truth, `postgres-prod-data` volume                              |
 | `redis`    | `redis:6379`    | `6381`                | notifications/ephemeral presence, no persistence directives (same posture as dev) |
-| `app`      | `:3000`         | `3100`                | `node dist/server.js`, `stop_grace_period: 30s`                                   |
+| `app-1`    | `:3000`         | `3100`                | `node dist/server.js` (`INSTANCE_ID=ws-a`), `stop_grace_period: 30s`              |
+| `app-2`    | `:3000`         | `3101`                | identical image (`INSTANCE_ID=ws-b`), added in 9.3                                |
 
 Host ports exist for operator access only (psql, redis-cli, curl,
 host-side `migrate deploy`); container-to-container traffic uses service
@@ -71,7 +75,7 @@ create + GET roundtrip; `livepulse_redis_connected{publisher,subscriber}
 shows `SIGTERM → Graceful shutdown complete`; restart returns `/health` 200. Development data was never touched (dev volume `4 users / 3 sessions
 / 1 quiz` intact; dev stack recreated with `docker compose up -d`).
 
-## Reverse proxy — Phase 9.2 (single upstream, no balancing)
+## Reverse proxy — Phase 9.2 (single upstream, then dual in 9.3)
 
 `nginx/nginx.conf` fronts the app; `nginx` service (`nginx:1.28-alpine`,
 127.0.0.1:3200 → 80, config mounted read-only) starts after the app is
@@ -129,8 +133,7 @@ Two test-harness lessons recorded: round-robin placement must be sampled
 (new connections until upstreams diverge, bounded retries — healthcheck
 traffic interleaves, so strict alternation can't be assumed), and the
 doubt wire shape uses `doubtId`, not `id`. No app, schema, pool, PG, or
-nginx-balancing change; killing an instance mid-session stays in
-Phase 9.7 failure testing.
+nginx-balancing change.
 
 ## Readiness semantics — Phase 9.5 (`/health` vs `/ready`)
 
@@ -222,7 +225,7 @@ ms-identical); `docker stop` returns ~10.2 s; reconnect 2 attempts /
 ~10.5 s to survivor; standings recovered from PG. Contrast SIGKILL (9.4):
 1006 in ~200 ms with no warning window. Drain does NOT shorten
 post-stop reconnect (~10.5 s both) — it moves disruption earlier and
-politely: reconnects can happen *during* the window instead of all at
+politely: reconnects can happen _during_ the window instead of all at
 once after abrupt death.
 
 Contract tests: `readiness.test.ts` D1 (ready flip, health stays 200),
@@ -236,13 +239,8 @@ errors explicitly.
 > existing sockets still break (1001 → reconnect → PG recovery). What
 > draining buys is intention and observability: a ready-signal,
 > immediate refusal of new admissions, and a known polite close — instead
-> of abrupt death. Fast *state recovery* (not socket preservation) is the
+> of abrupt death. Fast _state recovery_ (not socket preservation) is the
 > architectural tradeoff LivePulse deliberately makes.
-
-Not claimed: zero-downtime deployment (existing sockets still break at
-the deadline by design); nginx awareness of draining (OSS passive only —
-new connections may still be offered to the draining peer and refused,
-which is correct but chatty).
 
 ## Instance failure + recovery — Phase 9.4 (`docker kill`, no new mechanisms)
 
@@ -314,12 +312,46 @@ duplicates, no stale recovery, no indefinite dead-routing. Not tested:
 kill during the ~ms commit window itself (C kills after ack), Redis or
 PG failure, both instances simultaneously.
 
-## Limits (for later phases)
+## Failure matrix — Phase 9.7 (no new infrastructure)
 
-Single app instance; no Nginx/load balancing; no TLS/auth/rate limiting;
-no readiness endpoint (health is liveness-only by contract); metrics
-unauthenticated as in development. Host-port operator access is a local
-convenience, not a deployment model.
+Each row names its evidence (live topology run or suite). Scratch scripts
+deleted; all `f94*`/`f95*`/`f97*`/`x-*` rows cleaned from the prod volume
+afterward (verified 0/0).
+
+| Failure                  | Expected                                           | Evidence                                                                                                              |
+| ------------------------ | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| App SIGKILL              | WS 1006 → reconnect → PG recovery                  | §9.4 A/B/C live                                                                                                       |
+| App SIGTERM              | drain → 1001 at deadline → reconnect               | §9.6 live (1001 at +10,050 ms)                                                                                        |
+| PG unavailable           | `/ready` 503, `/health` 200                        | §9.5 live + R2                                                                                                        |
+| PG outage mid-session    | no verdict, sockets survive, resume + dedupe after | 9.7 live: answer attempt unanswered during outage; post-restore retry → duplicate path; PG holds exactly 1 answer row |
+| Redis unavailable        | 200 degraded, local serving                        | §9.5 live + R3/R4                                                                                                     |
+| Redis outage mid-traffic | local commits both sides, NO cross-instance leak   | 9.7 live: 6 s partition window with zero propagation                                                                  |
+| Redis restore            | propagation resumes (event-level)                  | 9.7 live: post-restore doubt received cross-instance; gauges 1/1                                                      |
+| App restart              | healthy, rejoins, renders peer events              | §9.4 D + §9.7 (restarted instance serving)                                                                            |
+| Duplicate answer retry   | existing verdict, no new row                       | §9.4 B/C + §9.7 (PG count 1 across outage)                                                                            |
+| Duplicate doubt retry    | existing doubt, still 1 row                        | §9.4 A/C + PG unique-scope verification                                                                               |
+| Heartbeat timeout        | dead peer terminated                               | suite (`ws-session` heartbeat test)                                                                                   |
+| Cross-instance traffic   | Redis propagation                                  | §9.3 + every live run since                                                                                           |
+| Presence loss            | eventual convergence ~20–25 s                      | §9.4 A/B measured                                                                                                     |
+
+Deliberately not tested: kill inside the millisecond commit window,
+Redis+PG simultaneous loss, dual-instance loss, network partition
+(split-brain), client-behavior under 1012 (no 1012 is ever sent —
+refusal is pre-handshake destroy).
+
+Not claimed: zero-downtime deployment (existing sockets still break at
+the deadline by design); nginx awareness of draining (OSS passive only —
+new connections may still be offered to the draining peer and refused,
+which is correct but chatty).
+
+## Limits (residual — what production still lacks)
+
+No TLS/auth/rate limiting; metrics unauthenticated as in development;
+no autoscaling/orchestration beyond Compose (health/readiness are
+container-local signals); host-port operator access is a local
+convenience, not a deployment model; the failure matrix's explicitly
+untested rows (simultaneous loss, split-brain, mid-commit kill) remain
+untested. Authentication + authorization is the planned Phase 10.
 
 ## Design property: Redis data loss on restart is acceptable
 

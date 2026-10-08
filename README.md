@@ -125,8 +125,8 @@ authentication, attendance history. Do not assume any of this exists.
 
 TypeScript (strict, ESM) · Node.js ≥ 22 · Fastify 5 · `ws` 8 · Prisma +
 PostgreSQL 17 · Redis 6 (node-redis, Pub/Sub propagation only) · Zod · Pino ·
-`prom-client` · Vitest · Docker Compose (PostgreSQL + Redis). k6, Nginx and
-Grafana arrive with their phases.
+`prom-client` · Vitest · Docker Compose (PostgreSQL + Redis) · Nginx
+(reverse proxy, two upstreams). k6 and Grafana arrive with their phases.
 
 ## Commands
 
@@ -151,10 +151,11 @@ pnpm prisma:migrate         # create/apply a dev migration (needs db:up)
 
 The backend ships as a minimal non-root image (`node dist/server.js`,
 `Dockerfile` multi-stage: toolchain + compile in build, prod-deps +
-`dist/` only at runtime). One app container plus Postgres/Redis via
-`docker-compose.prod.yml` (isolated `livepulse-prod` project; host ports
-3100/5434/6381 on 127.0.0.1 so the dev stack on 3000/5433/6380 is
-untouched; services talk over `postgres`/`redis` hostnames).
+`dist/` only at runtime). Two app containers (`app-1`/`app-2`) plus
+Postgres/Redis via `docker-compose.prod.yml` (isolated `livepulse-prod`
+project; host ports 3100/3101/5434/6381 on 127.0.0.1 so the dev stack on
+3000/5433/6380 is untouched; services talk over `postgres`/`redis`
+hostnames).
 
 ```bash
 export POSTGRES_PASSWORD="<local-only, URL-safe, never committed>"
@@ -167,8 +168,8 @@ curl -s http://127.0.0.1:3100/health   # → {"status":"ok"}
 ```
 
 Full design, migration workflow, verification log and limits:
-`docs/architecture/production.md`. Single instance only — Nginx, replicas,
-TLS and auth arrive in later phases.
+`docs/architecture/production.md`. Still ahead: TLS, auth, orchestration
+(Phase 10 is authentication + authorization).
 
 Phase 9.2 adds Nginx (`nginx/nginx.conf`, single upstream, no balancing)
 as the operator entrypoint on 127.0.0.1:3200; it proxies both HTTP and
