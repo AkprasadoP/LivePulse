@@ -132,6 +132,76 @@ doubt wire shape uses `doubtId`, not `id`. No app, schema, pool, PG, or
 nginx-balancing change; killing an instance mid-session stays in
 Phase 9.7 failure testing.
 
+## Instance failure + recovery — Phase 9.4 (`docker kill`, no new mechanisms)
+
+Topology above with `app-1` (ws-a, .4) + `app-2` (ws-b, .5). Failure =
+`docker kill` (SIGKILL, abrupt — never graceful stop for the primary
+tests). Redis and PostgreSQL untouched throughout. Scratch scripts (all
+traffic via :3200, placement via `X-Upstream-App`) since deleted; all
+`f94*`/`x-*` test rows removed from the prod volume afterward.
+
+What this is: connection-level interruption with state recovery — NOT
+zero downtime, NOT nginx-side WebSocket reconnection (an established WS
+dies with its upstream; the client reconnects and nginx routes the new
+connection).
+
+### A — kill teacher's instance (app-1, teacher on .4, student on .5)
+
+- Teacher socket dead **~200 ms** post-kill, close code **1006**. Student
+  on app-2 unaffected (5 s+); `GET /health` via nginx 200 throughout.
+- Reconnect: **2 attempts / ~10.5 s** — the first attempt hit the dead
+  peer and hung until `proxy_connect_timeout`; a killed container's IP
+  blackholes (no RST), so failover costs the connect timeout, not zero.
+  (A repeat with nginx already aware reconnected in 4 ms / 1 attempt.)
+- Rejoin recovery from PG: quizzes + published question + student-answer
+  standings + open doubt all present (`recovery` keys:
+  quizzes,question,ownAnswer,standings,doubts).
+- Presence: teacher gone from student's snapshots in **≤20 s**
+  (consistent with 30 s staleness given ~10 s digest cadence staleness at
+  kill time); teacher re-appears via survivor after rejoin.
+
+### B — mirror (kill app-2, student on .5, teacher on .4)
+
+Symmetric: student socket dead ~174 ms / 1006; teacher unaffected and
+fully functional during the outage (created a doubt alone on app-1);
+reconnect 2 attempts / ~10.5 s to app-1; recovery `ownAnswer` = the "4"
+(`isCorrect/isWinner true, attemptNumber 1`); presence converged ≤25 s.
+Answer retry post-rejoin returned `answer.accepted` with **zero new
+durable rows** — the `submitWithElection` duplicate path (existing
+attempt-1 → replay verdict, no re-broadcast, Phase 3 contract).
+
+### C — kill mid-traffic + true idempotency
+
+Answer accepted and doubt committed (both observed cross-instance), then
+immediate kill of the student's instance. After rejoin: `ownAnswer`
+restored; same-participant retries (same answer content; same
+`clientDoubtId`) → exactly **1 answer row and 1 doubt row** in
+PostgreSQL. Idempotency scope note, verified in PG: the doubt unique key
+is `(sessionId, participantId, doubtRequestId)` — same key from a
+_different_ participant legitimately creates a second row (observed,
+by design, not a duplicate bug).
+
+### D — restart rejoins the system
+
+`docker start` on the killed container → healthy; pinned `INSTANCE_ID`
+(`ws-a`/`ws-b`) back in logs; new connections land on it via nginx; events
+published on app-1 render on the restarted app-2 (Redis subscription
+re-established through normal startup — no replay, nothing special).
+Survivor metrics during outages: `redis_events_received_total` keeps
+flowing; a dead instance's own counters die with it (expected — the
+victim records nothing). One transient nginx `/health` 499 appeared once
+mid-kill-window among sustained 200s (not reproduced, not pursued).
+
+### Failure classification (observed)
+
+Expected: WS termination (1006, ~200 ms), nginx serving via survivor,
+client reconnect with ~10 s worst-case first-failover, PG recovery
+snapshots, cross-instance propagation after recovery, presence
+convergence in ~20–25 s. No durable loss, no reconnect-created
+duplicates, no stale recovery, no indefinite dead-routing. Not tested:
+kill during the ~ms commit window itself (C kills after ack), Redis or
+PG failure, both instances simultaneously.
+
 ## Limits (for later phases)
 
 Single app instance; no Nginx/load balancing; no TLS/auth/rate limiting;
