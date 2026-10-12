@@ -83,6 +83,20 @@ const WS_PATH = "/ws";
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 
 /**
+ * Minimal, non-sensitive headers we log for upgrade diagnostics.
+ * Never log cookies, authorization, or token headers.
+ */
+const UPGRADE_DIAGNOSTIC_HEADERS = [
+  "host",
+  "upgrade",
+  "connection",
+  "x-forwarded-for",
+  "x-forwarded-proto",
+  "x-real-ip",
+  "user-agent",
+] as const;
+
+/**
  * Attach the WebSocket layer to Fastify's HTTP server.
  *
  * Lifecycle (documented in docs/architecture/websocket-architecture.md):
@@ -117,6 +131,19 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     noServer: true, // we own the upgrade routing (single shared HTTP server)
     maxPayload: MAX_PAYLOAD_BYTES,
   });
+
+  /**
+   * Log minimal, non-sensitive upgrade diagnostics.
+   * Never logs cookies, authorization, or token headers.
+   */
+  function logUpgradeDiagnostics(request: IncomingMessage, context: string): void {
+    const headers: Record<string, string | undefined> = {};
+    for (const h of UPGRADE_DIAGNOSTIC_HEADERS) {
+      const v = request.headers[h];
+      if (v !== undefined) headers[h] = Array.isArray(v) ? v[0] : v;
+    }
+    app.log.debug({ pathname: request.url, headers, context }, "WebSocket upgrade diagnostic");
+  }
 
   // ---- Phase 7 presence (ephemeral, instance-local + Redis notices) --------
   // Presence is DERIVED from the live registry, never stored: PostgreSQL holds
@@ -297,11 +324,13 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
     try {
       pathname = new URL(request.url ?? "/", "ws://localhost").pathname;
     } catch {
+      logUpgradeDiagnostics(request, "url-parse-failed");
       socket.destroy();
       return;
     }
     if (pathname !== WS_PATH) {
       // Unknown upgrade target: refuse before any handshake bytes are sent.
+      logUpgradeDiagnostics(request, "path-mismatch");
       socket.destroy();
       return;
     }
@@ -310,11 +339,26 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       // to terminate. Destroy (not a polite close — there is no Connection
       // yet, and a 1012 here would still churn registry/presence). The
       // client reconnects through Nginx to a healthy instance.
+      logUpgradeDiagnostics(request, "draining");
       socket.destroy();
       return;
     }
+    logUpgradeDiagnostics(request, "handle-upgrade");
     wss.handleUpgrade(request, socket, head, (ws) => {
+      logUpgradeDiagnostics(request, "upgrade-success");
       wss.emit("connection", ws, request);
+    });
+    // handleUpgrade can emit 'error' on the wss if the upgrade fails.
+    // We attach a one-time listener to capture failures for this specific upgrade.
+    const onUpgradeError = (err: Error) => {
+      logUpgradeDiagnostics(request, "upgrade-error");
+      app.log.warn({ err: err.message, pathname }, "WebSocket upgrade failed");
+    };
+    wss.once("error", onUpgradeError);
+    // Clean up the error listener once the upgrade completes or fails.
+    // The 'connection' event on wss fires after successful upgrade.
+    wss.once("connection", () => {
+      wss.off("error", onUpgradeError);
     });
   };
   httpServer.on("upgrade", upgradeListener);
