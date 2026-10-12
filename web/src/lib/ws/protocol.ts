@@ -85,6 +85,7 @@ export interface DoubtView {
   enqueueSeq: number;
   status: DoubtStatus;
   createdAt: string;
+  explanation?: string | null;
 }
 
 // ---- Recovery snapshot (Phase 5) -------------------------------------------
@@ -200,6 +201,7 @@ export interface DoubtResolvedPayload {
   doubtId: string;
   status: "RESOLVED";
   resolvedAt: string;
+  explanation: string;
 }
 
 export interface DoubtDismissedPayload {

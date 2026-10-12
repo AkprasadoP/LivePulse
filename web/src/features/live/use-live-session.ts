@@ -88,7 +88,7 @@ export interface LiveSessionController {
     closeQuestion: (questionId: string) => Promise<ActionResult>;
     submitAnswer: (questionId: string, content: string) => Promise<ActionResult>;
     createDoubt: (content: string, clientDoubtId?: string) => Promise<ActionResult>;
-    resolveDoubt: (doubtId: string) => Promise<ActionResult>;
+    resolveDoubt: (doubtId: string, explanation: string) => Promise<ActionResult>;
     dismissDoubt: (doubtId: string) => Promise<ActionResult>;
     refreshDoubts: () => Promise<ActionResult>;
   };
