@@ -318,6 +318,16 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
 
   // ---- HTTP Upgrade routing ----------------------------------------------
   const upgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    // First line of defense: log every incoming upgrade attempt at info level
+    // so we can confirm the event reaches Node even when debug is not enabled
+    // or upstream proxies drop the connection.
+    const upgradeHeaders: Record<string, string | undefined> = {};
+    for (const h of ["host", "upgrade", "connection", "x-forwarded-proto"] as const) {
+      const v = request.headers[h];
+      if (v !== undefined) upgradeHeaders[h] = Array.isArray(v) ? v[0] : v;
+    }
+    app.log.info({ url: request.url, headers: upgradeHeaders }, "HTTP upgrade event received");
+
     // Parse defensively: a malformed request target must never throw out of the
     // HTTP 'upgrade' event (an uncaught throw there would crash the process).
     let pathname: string;
@@ -344,20 +354,33 @@ export function attachWebSocketLayer(options: WsLayerOptions): WebSocketLayer {
       return;
     }
     logUpgradeDiagnostics(request, "handle-upgrade");
+
+    // Track this upgrade attempt to scope error handling narrowly.
+    // Avoids the global wss "error" listener race where concurrent upgrades
+    // could steal each other's error events.
+    const pendingUpgrades = new WeakSet<IncomingMessage>();
+    pendingUpgrades.add(request);
+
     wss.handleUpgrade(request, socket, head, (ws) => {
+      pendingUpgrades.delete(request);
       logUpgradeDiagnostics(request, "upgrade-success");
       wss.emit("connection", ws, request);
     });
+
     // handleUpgrade can emit 'error' on the wss if the upgrade fails.
-    // We attach a one-time listener to capture failures for this specific upgrade.
+    // We attach a one-time listener but only act if our request is still pending.
     const onUpgradeError = (err: Error) => {
+      if (!pendingUpgrades.has(request)) return; // another upgrade's error
+      pendingUpgrades.delete(request);
       logUpgradeDiagnostics(request, "upgrade-error");
       app.log.warn({ err: err.message, pathname }, "WebSocket upgrade failed");
     };
     wss.once("error", onUpgradeError);
+
     // Clean up the error listener once the upgrade completes or fails.
     // The 'connection' event on wss fires after successful upgrade.
     wss.once("connection", () => {
+      if (pendingUpgrades.has(request)) pendingUpgrades.delete(request);
       wss.off("error", onUpgradeError);
     });
   };

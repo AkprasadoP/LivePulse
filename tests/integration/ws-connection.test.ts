@@ -12,6 +12,7 @@ import {
   waitFor,
   registerAndCreateSession,
   TEST_DATABASE_URL,
+  startIndependentInstance,
 } from "./helpers.js";
 import { loadConfig } from "../../src/config/index.js";
 import { buildApp } from "../../src/app/app.js";
@@ -133,5 +134,51 @@ describe("WebSocket connection lifecycle (integration)", () => {
     expect((await firstClose).code).toBe(1001);
     expect((await secondClose).code).toBe(1001);
     expect(layer?.registry.connectionCount).toBe(0);
+  });
+});
+
+describe("WebSocket upgrade diagnostics", () => {
+  let instance: Awaited<ReturnType<typeof startIndependentInstance>>;
+
+  afterAll(async () => {
+    if (instance) await instance.close();
+  });
+
+  it("logs incoming upgrade event at info level", async () => {
+    const logChunks: string[] = [];
+    const logStream = {
+      write: (chunk: string) => {
+        logChunks.push(chunk);
+      },
+    } as NodeJS.WritableStream;
+
+    instance = await startIndependentInstance("diag-test", { logStream });
+
+    const client = new WsTestClient();
+    await client.connect(instance.port);
+    await client.close();
+
+    // Find the structured log line for the upgrade event
+    const upgradeLog = logChunks
+      .map((c) => {
+        try {
+          return JSON.parse(c);
+        } catch {
+          return null;
+        }
+      })
+      .find((entry) => entry?.msg === "HTTP upgrade event received");
+
+    expect(upgradeLog).toBeDefined();
+    expect(upgradeLog?.url).toBe("/ws");
+    expect(upgradeLog?.headers).toHaveProperty("upgrade", "websocket");
+    expect(upgradeLog?.headers).toHaveProperty("connection");
+    // x-forwarded-proto may not be present in local test, but if present should be defined
+    if (upgradeLog?.headers["x-forwarded-proto"] !== undefined) {
+      expect(typeof upgradeLog.headers["x-forwarded-proto"]).toBe("string");
+    }
+    // Sensitive headers must never be logged
+    expect(upgradeLog?.headers).not.toHaveProperty("cookie");
+    expect(upgradeLog?.headers).not.toHaveProperty("authorization");
   });
 });
