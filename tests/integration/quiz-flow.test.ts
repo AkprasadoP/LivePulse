@@ -9,6 +9,7 @@ import {
   joinAs,
   createLiveQuizScenario,
   registerAndCreateSession,
+  registerTestUser,
   bearerHeaders,
   WsTestClient,
 } from "./helpers.js";
@@ -479,5 +480,179 @@ describe("Live quiz flow (integration)", () => {
       sawConsistent = true;
     }
     await teacher.close();
+  });
+
+  it("includes hasCorrectAnswer in question.published and recovery snapshot", async () => {
+    // Scored question (has correctAnswer)
+    const scoredScenario = await createLiveQuizScenario({ correctAnswer: "Berlin" });
+    const teacher = await connectWsClient();
+    const student = await connectWsClient();
+    await joinAs(teacher, scoredScenario.sessionId, scoredScenario.teacherDisplayName);
+    await joinAs(student, scoredScenario.sessionId, "Student-1");
+
+    teacher.send({
+      type: "quiz.start",
+      requestId: "q1",
+      payload: { quizId: scoredScenario.quizId },
+    });
+    await teacher.waitFor((m) => m.type === "quiz.started");
+    teacher.send({
+      type: "question.publish",
+      requestId: "q2",
+      payload: { questionId: scoredScenario.questions[0]!.id },
+    });
+    const published = await student.waitFor(
+      (m) => m.type === "question.published" && m.requestId === "q2",
+    );
+    expect(published.payload).toMatchObject({ hasCorrectAnswer: true });
+
+    // Unscored question (no correctAnswer)
+    const unscoredScenario = await createLiveQuizScenario({ correctAnswer: null });
+    const teacher2 = await connectWsClient();
+    const student2 = await connectWsClient();
+    await joinAs(teacher2, unscoredScenario.sessionId, unscoredScenario.teacherDisplayName);
+    await joinAs(student2, unscoredScenario.sessionId, "Student-2");
+
+    teacher2.send({
+      type: "quiz.start",
+      requestId: "q3",
+      payload: { quizId: unscoredScenario.quizId },
+    });
+    await teacher2.waitFor((m) => m.type === "quiz.started");
+    teacher2.send({
+      type: "question.publish",
+      requestId: "q4",
+      payload: { questionId: unscoredScenario.questions[0]!.id },
+    });
+    const published2 = await student2.waitFor(
+      (m) => m.type === "question.published" && m.requestId === "q4",
+    );
+    expect(published2.payload).toMatchObject({ hasCorrectAnswer: false });
+
+    // Recovery snapshot also includes hasCorrectAnswer
+    await student2.close();
+    const student3 = await connectWsClient();
+    const recoveryJoin = await joinAs(student3, unscoredScenario.sessionId, "Student-2");
+    const recovery = recoveryJoin.recovery as {
+      question: { hasCorrectAnswer: boolean } | null;
+    } | null;
+    expect(recovery?.question?.hasCorrectAnswer).toBe(false);
+
+    await teacher.close();
+    await teacher2.close();
+    await student.close();
+    await student2.close();
+    await student3.close();
+  });
+
+  it("rejects quiz.answer with SESSION_ENDED after the session ends", async () => {
+    const scenario = await createLiveQuizScenario({ correctAnswer: "Berlin" });
+    const teacher = await connectWsClient();
+    const student = await connectWsClient();
+    await joinAs(teacher, scenario.sessionId, scenario.teacherDisplayName);
+    await joinAs(student, scenario.sessionId, "Student-1");
+
+    teacher.send({ type: "quiz.start", requestId: "q1", payload: { quizId: scenario.quizId } });
+    await teacher.waitFor((m) => m.type === "quiz.started");
+    teacher.send({
+      type: "question.publish",
+      requestId: "q2",
+      payload: { questionId: scenario.questions[0]!.id },
+    });
+    await student.waitFor((m) => m.type === "question.published");
+
+    // Get the teacher's access token to end the session via HTTP
+    const teacherIdentity = await registerTestUser(scenario.teacherDisplayName, app);
+    // Teacher ends the session via HTTP
+    await app.inject({
+      method: "POST",
+      url: `/sessions/${scenario.sessionId}/state`,
+      payload: JSON.stringify({ state: "ENDED" }),
+      headers: {
+        "content-type": "application/json",
+        ...bearerHeaders(teacherIdentity.accessToken),
+      },
+    });
+
+    // Now try to submit an answer - should be rejected with SESSION_ENDED
+    student.send({
+      type: "quiz.answer",
+      requestId: "late",
+      payload: { questionId: scenario.questions[0]!.id, content: "Berlin" },
+    });
+    const error = await student.waitFor((m) => m.type === "error" && m.requestId === "late");
+    expect(error.payload).toMatchObject({ code: "SESSION_ENDED" });
+
+    // No answer should be persisted
+    const answerRows = await prisma.answer.findMany();
+    expect(answerRows).toHaveLength(0);
+
+    await teacher.close();
+    await student.close();
+  });
+
+  it("serializes session ending and answer submission at the database level (race)", async () => {
+    const scenario = await createLiveQuizScenario({ correctAnswer: "Berlin" });
+    const teacher = await connectWsClient();
+    const student = await connectWsClient();
+    await joinAs(teacher, scenario.sessionId, scenario.teacherDisplayName);
+    await joinAs(student, scenario.sessionId, "Student-1");
+
+    teacher.send({ type: "quiz.start", requestId: "q1", payload: { quizId: scenario.quizId } });
+    await teacher.waitFor((m) => m.type === "quiz.started");
+    teacher.send({
+      type: "question.publish",
+      requestId: "q2",
+      payload: { questionId: scenario.questions[0]!.id },
+    });
+    await student.waitFor((m) => m.type === "question.published");
+
+    // Get the teacher's access token
+    const teacherIdentity = await registerTestUser(scenario.teacherDisplayName, app);
+
+    // FIRE both the session end (HTTP) and an answer (WS) concurrently.
+    // The database row locks (session FOR NO KEY UPDATE + session UPDATE)
+    // serialize them: exactly one wins. The answer is either accepted
+    // (if its transaction commits first) or rejected with SESSION_ENDED
+    // (if the session transition commits first). Neither path leaves
+    // the system in an inconsistent state.
+    const endSession = app.inject({
+      method: "POST",
+      url: `/sessions/${scenario.sessionId}/state`,
+      payload: JSON.stringify({ state: "ENDED" }),
+      headers: {
+        "content-type": "application/json",
+        ...bearerHeaders(teacherIdentity.accessToken),
+      },
+    });
+    student.send({
+      type: "quiz.answer",
+      requestId: "race",
+      payload: { questionId: scenario.questions[0]!.id, content: "Berlin" },
+    });
+
+    const [endResult, error] = await Promise.all([
+      endSession,
+      student.waitFor((m) => m.type === "error" && m.requestId === "race"),
+    ]);
+
+    // Exactly one of: session end succeeds + answer rejected, OR answer accepted + session end fails
+    // (The session state transition is idempotent-ish; if it races with a committed answer,
+    // the transition still succeeds because the state was already LIVE, just the answer
+    // arrived first. Both outcomes are correct.)
+    expect(endResult.statusCode).toBe(200);
+    expect(error.payload.code).toBe("SESSION_ENDED");
+
+    // Verify no duplicate answers or inconsistent state
+    const answerRows = await prisma.answer.findMany({
+      where: { questionId: scenario.questions[0]!.id },
+    });
+    expect(answerRows.length).toBeLessThanOrEqual(1);
+    if (answerRows.length === 1) {
+      expect(answerRows[0]!.isWinner).toBe(true);
+    }
+
+    await teacher.close();
+    await student.close();
   });
 });

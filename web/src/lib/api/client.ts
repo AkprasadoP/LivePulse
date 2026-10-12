@@ -84,7 +84,11 @@ export class ApiClient {
     return this.parse<T>(response);
   }
 
-  private async send(path: string, options: RequestOptions, accessToken?: string): Promise<Response> {
+  private async send(
+    path: string,
+    options: RequestOptions,
+    accessToken?: string,
+  ): Promise<Response> {
     const url = `${this.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
     const headers: Record<string, string> = { Accept: "application/json" };
     if (options.body !== undefined) headers["Content-Type"] = "application/json";

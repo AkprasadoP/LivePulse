@@ -10,3 +10,10 @@ pnpm-lock.yaml
 dist/
 node_modules/
 coverage/
+web/.next/
+web/node_modules/
+web/pnpm-lock.yaml
+
+# Documentation and load-test files with intentional formatting.
+docs/
+load-tests/

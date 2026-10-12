@@ -180,7 +180,8 @@ export const recoveryQuestionSchema = z.object({
   questionId: z.uuid(),
   position: z.number().int(),
   prompt: z.string(),
-  /** Absent from student-visible payloads; always null over the wire. */
+  /** True iff the question has a correct answer key (correctAnswer != null). */
+  hasCorrectAnswer: z.boolean(),
   firstCorrectWins: z.boolean(),
   state: z.enum(["PUBLISHED", "CLOSED"]),
   /** true iff state === "PUBLISHED" (mirrors question.published semantics). */
@@ -254,7 +255,8 @@ export const questionPublishedPayloadSchema = z.object({
   questionId: z.uuid(),
   position: z.number().int(),
   prompt: z.string(),
-  /** Absent from student-visible payloads; always null over the wire. */
+  /** True iff the question has a correct answer key (correctAnswer != null). */
+  hasCorrectAnswer: z.boolean(),
   firstCorrectWins: z.boolean(),
   acceptingAnswers: z.literal(true),
 });
@@ -374,6 +376,7 @@ export const errorPayloadSchema = z.object({
     "NOT_A_PARTICIPANT",
     "TEACHER_REQUIRED",
     "SESSION_NOT_LIVE",
+    "SESSION_ENDED",
     "QUIZ_NOT_FOUND",
     "QUESTION_NOT_FOUND",
     "QUIZ_NOT_ACTIVE",

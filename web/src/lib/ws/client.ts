@@ -1,9 +1,5 @@
 import { WS_HEARTBEAT_INTERVAL_MS } from "@/lib/config";
-import {
-  type ClientEventType,
-  type ProtocolError,
-  type ServerEnvelope,
-} from "./protocol";
+import { type ClientEventType, type ProtocolError, type ServerEnvelope } from "./protocol";
 
 /**
  * Connection state surfaced to the UI. CONNECTED / RECONNECTING / RECOVERING /

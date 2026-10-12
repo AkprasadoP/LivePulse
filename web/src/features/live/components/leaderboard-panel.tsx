@@ -45,9 +45,7 @@ export function LeaderboardPanel({
                 className="flex items-center gap-3 rounded-sm border border-transparent px-1.5 py-1.5 data-[self=true]:border-border data-[self=true]:bg-surface-muted"
                 data-self={entry.participantId === selfParticipantId}
               >
-                <span className="lp-tnum w-5 text-center text-xs text-ink-subtle">
-                  {index + 1}
-                </span>
+                <span className="lp-tnum w-5 text-center text-xs text-ink-subtle">{index + 1}</span>
                 <Avatar name={entry.displayName} seed={entry.participantId} size="xs" />
                 <span className="min-w-0 flex-1 truncate text-sm text-ink">
                   {entry.displayName}

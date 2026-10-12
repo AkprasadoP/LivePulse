@@ -73,7 +73,10 @@ export function YourSessions() {
         (error: unknown) => {
           if (cancelled) return;
           const missing =
-            typeof error === "object" && error !== null && "status" in error && error.status === 404;
+            typeof error === "object" &&
+            error !== null &&
+            "status" in error &&
+            error.status === 404;
           setFacts((current) => ({
             ...current,
             [entry.id]: missing ? "missing" : "error",

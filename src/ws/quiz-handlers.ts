@@ -115,6 +115,7 @@ export async function handleQuestionPublish(
     { sessionId, quizId: quiz.id, questionId: question.id },
     "WebSocket question published",
   );
+  const hasCorrectAnswer = updated.correctAnswer !== null;
   broadcast(
     deps,
     sessionId,
@@ -123,8 +124,8 @@ export async function handleQuestionPublish(
       quizId: quiz.id,
       questionId: updated.id,
       position: updated.position,
-      // correctAnswer NEVER crosses the wire; firstCorrectWins is public.
       prompt: updated.prompt,
+      hasCorrectAnswer,
       firstCorrectWins: updated.firstCorrectWins,
       acceptingAnswers: true,
     }),
@@ -151,6 +152,7 @@ export async function handleQuestionPublish(
       questionId: updated.id,
       position: updated.position,
       prompt: updated.prompt,
+      hasCorrectAnswer,
       firstCorrectWins: updated.firstCorrectWins,
       acceptingAnswers: true,
     },
@@ -247,13 +249,32 @@ export async function handleQuizAnswer(
     throw new NotFoundError("Question", payload.questionId);
   }
 
+  // Check session lifecycle: reject answers after session has ended.
+  const session = await deps.sessionRepository.getById(sessionId);
+  if (!session) throw new NotFoundError("Session", sessionId);
+  if (session.state === "ENDED") {
+    sendProtocolError(
+      connection,
+      requestId,
+      {
+        code: "SESSION_ENDED",
+        message: "This session has ended; answers are no longer accepted",
+        details: null,
+      },
+      deps.log,
+    );
+    return;
+  }
+
   // Persist + elect atomically (ADR-004). Duplicate-safe; re-checks question
-  // state under the row lock, so an in-flight close is respected.
+  // state under the row lock, so an in-flight close is respected. Also locks
+  // the session row to serialize with session state transitions (LIVE -> ENDED).
   const answerStarted = performance.now();
   const result = await deps.answerRepository.submitWithElection({
     question,
     participantId,
     content: payload.content,
+    sessionId,
   });
   const answerSeconds = (performance.now() - answerStarted) / 1000;
   deps.log.metrics?.quizAnswerDuration.observe(answerSeconds);
@@ -268,12 +289,18 @@ export async function handleQuizAnswer(
   });
 
   if (result.outcome === "rejected") {
+    const code =
+      result.reason === "session_ended" ? "SESSION_ENDED" : "QUESTION_NOT_ACCEPTING_ANSWERS";
+    const message =
+      result.reason === "session_ended"
+        ? "This session has ended; answers are no longer accepted"
+        : "This question is not accepting answers";
     sendProtocolError(
       connection,
       requestId,
       {
-        code: "QUESTION_NOT_ACCEPTING_ANSWERS",
-        message: "This question is not accepting answers",
+        code,
+        message,
         details: null,
       },
       deps.log,

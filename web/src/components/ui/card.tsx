@@ -6,10 +6,7 @@ export function Card({ className, children, ...rest }: HTMLAttributes<HTMLDivEle
   return (
     <div
       {...rest}
-      className={cn(
-        "rounded-md border border-border bg-surface shadow-card",
-        className,
-      )}
+      className={cn("rounded-md border border-border bg-surface shadow-card", className)}
     >
       {children}
     </div>

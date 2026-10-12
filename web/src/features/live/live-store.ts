@@ -17,6 +17,7 @@ export interface CurrentQuestion {
   quizId: string;
   position: number;
   prompt: string;
+  hasCorrectAnswer: boolean;
   firstCorrectWins: boolean;
   state: "PUBLISHED" | "CLOSED";
   acceptingAnswers: boolean;
@@ -112,9 +113,7 @@ export interface LiveEvent {
 function upsertDoubt(list: DoubtView[], doubt: DoubtView): DoubtView[] {
   const without = list.filter((d) => d.doubtId !== doubt.doubtId);
   if (doubt.status !== "OPEN") return without;
-  return [...without, doubt].sort(
-    (a, b) => b.priority - a.priority || a.enqueueSeq - b.enqueueSeq,
-  );
+  return [...without, doubt].sort((a, b) => b.priority - a.priority || a.enqueueSeq - b.enqueueSeq);
 }
 
 export function reduceLiveEvent(state: LiveSessionState, event: LiveEvent): LiveSessionState {
@@ -198,6 +197,7 @@ export function reduceLiveEvent(state: LiveSessionState, event: LiveEvent): Live
           quizId: payload.quizId as string,
           position: payload.position as number,
           prompt: payload.prompt as string,
+          hasCorrectAnswer: (payload.hasCorrectAnswer as boolean) ?? false,
           firstCorrectWins: (payload.firstCorrectWins as boolean) ?? true,
           state: "PUBLISHED",
           acceptingAnswers: true,

@@ -22,11 +22,7 @@ interface AuthContextValue {
   status: AuthStatus;
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<AuthUser>;
-  register: (input: {
-    email: string;
-    password: string;
-    displayName: string;
-  }) => Promise<AuthUser>;
+  register: (input: { email: string; password: string; displayName: string }) => Promise<AuthUser>;
   logout: () => Promise<void>;
   /** A usable access token, refreshing when absent/expired. Null ⇒ signed out. */
   ensureAccessToken: () => Promise<string | null>;

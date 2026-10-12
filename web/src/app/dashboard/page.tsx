@@ -37,10 +37,7 @@ function DashboardContent() {
           </Card>
 
           <Card>
-            <CardHeader
-              title="Join a session"
-              description="Use the link your teacher shared."
-            />
+            <CardHeader title="Join a session" description="Use the link your teacher shared." />
             <CardBody>
               <JoinSessionCard />
             </CardBody>

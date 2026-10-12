@@ -33,9 +33,7 @@ export function SessionControls({
 
   if (state === "ENDED") {
     return (
-      <InlineAlert tone="info">
-        This session has ended. Answers and doubts are frozen.
-      </InlineAlert>
+      <InlineAlert tone="info">This session has ended. Answers and doubts are frozen.</InlineAlert>
     );
   }
 

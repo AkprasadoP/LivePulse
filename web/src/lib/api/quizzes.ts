@@ -17,6 +17,4 @@ export const quizzesApi = {
   get(quizId: string): Promise<QuizResponse> {
     return api.request<QuizResponse>(`/quizzes/${encodeURIComponent(quizId)}`);
   },
-
-
 };

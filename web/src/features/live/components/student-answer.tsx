@@ -125,9 +125,7 @@ export function StudentAnswer({
         </InlineAlert>
       ) : null}
       {closed ? (
-        <InlineAlert tone="info">
-          This question is closed. Wait for the next one.
-        </InlineAlert>
+        <InlineAlert tone="info">This question is closed. Wait for the next one.</InlineAlert>
       ) : !canAnswer ? (
         <InlineAlert tone="warn">
           You are not connected to the session, so answers are paused.

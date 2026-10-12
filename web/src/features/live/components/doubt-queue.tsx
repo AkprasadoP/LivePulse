@@ -61,9 +61,7 @@ export function DoubtQueuePanel({
         {doubts.length === 0 ? (
           <EmptyState
             title="No open doubts"
-            description={
-              emptyDescription ?? "Questions raised during the session land here."
-            }
+            description={emptyDescription ?? "Questions raised during the session land here."}
           />
         ) : (
           <ol className="space-y-3">

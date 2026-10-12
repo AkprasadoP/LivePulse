@@ -9,6 +9,7 @@ const question: CurrentQuestion = {
   quizId: "qz1",
   position: 1,
   prompt: "Capital of Germany?",
+  hasCorrectAnswer: true,
   firstCorrectWins: true,
   state: "PUBLISHED",
   acceptingAnswers: true,
@@ -21,7 +22,10 @@ function renderAnswer(overrides: {
   ownAnswer?: OwnAnswer | null;
   answerResult?: AnswerResult | null;
   canAnswer?: boolean;
-  onSubmit?: (questionId: string, content: string) => Promise<{ ok: true } | { ok: false; error: unknown; message: string }>;
+  onSubmit?: (
+    questionId: string,
+    content: string,
+  ) => Promise<{ ok: true } | { ok: false; error: unknown; message: string }>;
 }) {
   const onSubmit = overrides.onSubmit ?? vi.fn(ok);
   render(
@@ -61,7 +65,10 @@ describe("StudentAnswer", () => {
     const onSubmit = vi.fn(() =>
       Promise.resolve({ ok: false as const, error: new Error("x"), message: "Not accepted." }),
     );
-    renderAnswer({ answerResult: { questionId: "q1", status: "rejected", reason: "not_accepting_answers" }, onSubmit });
+    renderAnswer({
+      answerResult: { questionId: "q1", status: "rejected", reason: "not_accepting_answers" },
+      onSubmit,
+    });
 
     expect(
       screen.getByText("This question stopped accepting answers before yours arrived."),

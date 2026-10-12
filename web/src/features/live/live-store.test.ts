@@ -53,7 +53,9 @@ describe("live-store session.joined", () => {
           attemptNumber: 1,
           submittedAt: "2026-01-01T09:01:00.000Z",
         },
-        standings: [{ participantId: "p-self", displayName: "Ana", correctCount: 1, isWinner: true }],
+        standings: [
+          { participantId: "p-self", displayName: "Ana", correctCount: 1, isWinner: true },
+        ],
         doubts: { open: [doubt("d1", 0, 1)], truncated: false },
       },
     });
@@ -62,7 +64,11 @@ describe("live-store session.joined", () => {
     expect(state.role).toBe("STUDENT");
     expect(state.currentQuestion?.questionId).toBe("q1");
     expect(state.ownAnswer?.content).toBe("Berlin");
-    expect(state.answerResult).toMatchObject({ status: "accepted", isCorrect: true, isWinner: true });
+    expect(state.answerResult).toMatchObject({
+      status: "accepted",
+      isCorrect: true,
+      isWinner: true,
+    });
     expect(state.standings).toHaveLength(1);
     expect(state.doubts.map((d) => d.doubtId)).toEqual(["d1"]);
     expect(state.recoveryReceived).toBe(true);
@@ -111,7 +117,11 @@ describe("live-store session.joined", () => {
       },
     });
 
-    expect(state.currentQuestion).toMatchObject({ questionId: "q9", state: "CLOSED", acceptingAnswers: false });
+    expect(state.currentQuestion).toMatchObject({
+      questionId: "q9",
+      state: "CLOSED",
+      acceptingAnswers: false,
+    });
     expect(state.ownAnswer).toBeNull();
     expect(state.answerResult).toBeNull();
   });
@@ -136,7 +146,13 @@ describe("live-store question lifecycle", () => {
         firstCorrectWins: true,
       }),
       "answer.accepted",
-      { participantId: "p-self", questionId: "q1", isCorrect: true, isWinner: true, attemptNumber: 1 },
+      {
+        participantId: "p-self",
+        questionId: "q1",
+        isCorrect: true,
+        isWinner: true,
+        attemptNumber: 1,
+      },
     );
     expect(withOld.ownAnswer).not.toBeNull();
 

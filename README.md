@@ -131,6 +131,46 @@ PostgreSQL 17 · Redis 6 (node-redis, Pub/Sub propagation only) · Zod · Pino �
 `prom-client` · Vitest · Docker Compose (PostgreSQL + Redis) · Nginx
 (reverse proxy, two upstreams). k6 and Grafana arrive with their phases.
 
+## Local Development (Backend + Frontend)
+
+The backend and frontend **must run on different ports** (both default to 3000).
+
+```bash
+# 1. Start dependencies (PostgreSQL on 5433, Redis on 6380)
+pnpm db:up
+
+# 2. Configure environment (one-time)
+cp .env.example .env
+
+# 3. Terminal 1 — Backend (port 3000)
+pnpm dev
+
+# 4. Terminal 2 — Frontend (port 3001)
+cd web && PORT=3001 pnpm dev
+```
+
+| Service               | URL                           |
+| --------------------- | ----------------------------- |
+| Frontend (Next.js)    | <http://localhost:3001>       |
+| Backend API (proxied) | <http://localhost:3001/api/*> |
+| Backend API (direct)  | <http://localhost:3000/*>     |
+| WebSocket (direct)    | `ws://127.0.0.1:3000/ws`      |
+
+### Why separate ports?
+
+- Backend (Fastify) listens on `PORT=3000` for HTTP + WebSocket on the **same port**.
+- Frontend (Next.js) defaults to port 3000 but **proxies `/api/*` to the backend** via `next.config.ts` rewrites.
+- If both try to bind port 3000, the second one fails with `EADDRINUSE` and the Next.js dev server serves its own 404 page for `/api/*` requests.
+
+### Frontend Environment Overrides
+
+Create `web/.env.local` to avoid typing `PORT=3001` every time:
+
+```bash
+PORT=3001
+NEXT_PUBLIC_WS_URL=ws://127.0.0.1:3000/ws
+```
+
 ## Commands
 
 ```bash
@@ -138,7 +178,7 @@ pnpm install                # install dependencies
 pnpm db:up                  # start PostgreSQL (host 5433) + Redis (host 6380)
 cp .env.example .env        # then edit if needed
 pnpm db:test:setup          # one-time: create livepulse_test + apply migrations
-pnpm dev                    # run the server in watch mode (HTTP + WS on one port)
+pnpm dev                    # run the BACKEND in watch mode (HTTP + WS on one port)
 pnpm build && pnpm start    # production-style run (compiles to dist/)
 pnpm typecheck              # strict TypeScript check
 pnpm test:unit              # unit tests (no database required)
@@ -148,6 +188,17 @@ pnpm format                 # Prettier
 pnpm prisma:validate        # validate prisma/schema.prisma
 pnpm prisma:generate        # generate the Prisma client
 pnpm prisma:migrate         # create/apply a dev migration (needs db:up)
+```
+
+### Frontend Commands (run from `web/`)
+
+```bash
+pnpm dev          # dev server (set PORT=3001 to avoid backend collision)
+pnpm build        # production build
+pnpm start        # production server
+pnpm lint         # ESLint
+pnpm typecheck    # TypeScript check
+pnpm test         # Vitest unit tests
 ```
 
 ## Production container (Phase 9.1)

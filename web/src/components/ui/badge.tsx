@@ -57,7 +57,5 @@ export function StatusDot({ tone = "neutral", pulse = false }: { tone?: Tone; pu
 
 export function RoleBadge({ role }: { role: "TEACHER" | "STUDENT" | null }) {
   if (!role) return null;
-  return (
-    <Badge tone={role === "TEACHER" ? "accent" : "neutral"}>{role.toLowerCase()}</Badge>
-  );
+  return <Badge tone={role === "TEACHER" ? "accent" : "neutral"}>{role.toLowerCase()}</Badge>;
 }

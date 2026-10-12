@@ -1,12 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type {
-  CreateQuizInput,
-  QuizQuestionView,
-  QuizView,
-  SessionState,
-} from "@/lib/api/types";
+import type { CreateQuizInput, QuizQuestionView, QuizView, SessionState } from "@/lib/api/types";
 import type { RecoveryQuiz } from "@/lib/ws/protocol";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -126,11 +121,7 @@ export function TeacherQuizPanel({
                       </Badge>
                     </div>
                     <div className="flex gap-2">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => void onLoadQuiz(quiz.id)}
-                      >
+                      <Button size="sm" variant="ghost" onClick={() => void onLoadQuiz(quiz.id)}>
                         Reload
                       </Button>
                       <Button
@@ -138,7 +129,9 @@ export function TeacherQuizPanel({
                         variant="primary"
                         disabled={!isLive || quizState !== "DRAFT"}
                         loading={busy === `start-${quiz.id}`}
-                        onClick={() => void run(`start-${quiz.id}`, () => actions.startQuiz(quiz.id))}
+                        onClick={() =>
+                          void run(`start-${quiz.id}`, () => actions.startQuiz(quiz.id))
+                        }
                       >
                         Start quiz
                       </Button>

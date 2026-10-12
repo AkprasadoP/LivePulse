@@ -34,9 +34,7 @@ export function PresencePanel({
         title="In the room"
         description={`${presence.length} online`}
         action={
-          onlineIds.size > 0 && teacher ? (
-            <Badge tone="accent">Teacher online</Badge>
-          ) : undefined
+          onlineIds.size > 0 && teacher ? <Badge tone="accent">Teacher online</Badge> : undefined
         }
       />
       <CardBody className="space-y-4">
@@ -49,11 +47,7 @@ export function PresencePanel({
           <ul className="space-y-2.5">
             {presence.map((participant) => (
               <li key={participant.participantId} className="flex items-center gap-3">
-                <Avatar
-                  name={participant.displayName}
-                  seed={participant.participantId}
-                  size="sm"
-                />
+                <Avatar name={participant.displayName} seed={participant.participantId} size="sm" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-ink">
                     {participant.displayName}
@@ -83,12 +77,7 @@ export function PresencePanel({
             <ul className="mt-2 space-y-2">
               {offline.map((participant) => (
                 <li key={participant.id} className="flex items-center gap-3">
-                  <Avatar
-                    name={participant.displayName}
-                    seed={participant.id}
-                    size="xs"
-                    dimmed
-                  />
+                  <Avatar name={participant.displayName} seed={participant.id} size="xs" dimmed />
                   <span className="truncate text-sm text-ink-subtle">
                     {participant.displayName}
                     {participant.id === selfParticipantId ? " (you)" : ""}

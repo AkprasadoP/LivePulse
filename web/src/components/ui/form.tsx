@@ -77,16 +77,17 @@ export function Textarea({
     <textarea
       {...rest}
       aria-invalid={invalid || undefined}
-      className={cn(control, "min-h-24 resize-y py-2.5 text-sm leading-relaxed", invalid && "border-danger/60", className)}
+      className={cn(
+        control,
+        "min-h-24 resize-y py-2.5 text-sm leading-relaxed",
+        invalid && "border-danger/60",
+        className,
+      )}
     />
   );
 }
 
-export function Select({
-  className,
-  children,
-  ...rest
-}: SelectHTMLAttributes<HTMLSelectElement>) {
+export function Select({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select {...rest} className={cn(control, "h-10 text-sm", className)}>
       {children}

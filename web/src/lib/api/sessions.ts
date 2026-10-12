@@ -39,7 +39,13 @@ export function getSession(): Promise<{
   quizzes: Array<{
     id: string;
     title: string;
-    questions: Array<{ id: string; prompt: string; position: number; hasCorrectAnswer: boolean; state: string }>;
+    questions: Array<{
+      id: string;
+      prompt: string;
+      position: number;
+      hasCorrectAnswer: boolean;
+      state: string;
+    }>;
   }>;
 }> {
   throw new Error("getSession() requires a sessionId — not wired for standalone use");

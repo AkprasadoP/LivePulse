@@ -20,10 +20,7 @@ export function AnswerActivityPanel({
 }) {
   return (
     <Card>
-      <CardHeader
-        title="Answer activity"
-        description={hasQuestion ? "Newest first" : undefined}
-      />
+      <CardHeader title="Answer activity" description={hasQuestion ? "Newest first" : undefined} />
       <CardBody>
         {!hasQuestion ? (
           <EmptyState

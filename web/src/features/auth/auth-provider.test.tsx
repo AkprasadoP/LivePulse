@@ -135,8 +135,11 @@ describe("AuthProvider cold start", () => {
 describe("AuthProvider single-flight refresh", () => {
   it("shares one in-flight refresh between concurrent callers", async () => {
     window.localStorage.setItem(REFRESH_KEY, "refresh-1");
-    let resolveRefresh: (value: { accessToken: string; refreshToken: string; expiresIn: number }) => void =
-      () => undefined;
+    let resolveRefresh: (value: {
+      accessToken: string;
+      refreshToken: string;
+      expiresIn: number;
+    }) => void = () => undefined;
     mocks.refresh.mockImplementation(
       () =>
         new Promise((resolve) => {

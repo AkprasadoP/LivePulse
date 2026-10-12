@@ -144,7 +144,10 @@ export function CreateQuizDialog({
 
         <div className="space-y-4">
           {questions.map((question, index) => (
-            <div key={question.key} className="rounded-md border border-border bg-surface-muted/60 p-3.5">
+            <div
+              key={question.key}
+              className="rounded-md border border-border bg-surface-muted/60 p-3.5"
+            >
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium uppercase tracking-wide text-ink-subtle">
                   Question {index + 1}
@@ -174,10 +177,7 @@ export function CreateQuizDialog({
                     />
                   )}
                 </Field>
-                <Field
-                  label="Correct answer"
-                  hint="optional — leave blank to score nothing"
-                >
+                <Field label="Correct answer" hint="optional — leave blank to score nothing">
                   {(props) => (
                     <Input
                       {...props}

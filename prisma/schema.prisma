@@ -171,6 +171,9 @@ model Quiz {
 /// One quiz item. UNIQUE (quizId, position) gives deterministic delivery
 /// order. correctAnswer is nullable: unkeyed questions stay ungraded.
 /// firstCorrectWins is the Phase 4 semantics flag.
+/// hasCorrectAnswer is a computed flag for the wire protocol (true iff
+/// correctAnswer is not null) — avoids leaking the key while letting
+/// clients show "Scored" vs "Unscored" labels.
 model Question {
   id               String        @id @default(uuid(7))
   quizId           String

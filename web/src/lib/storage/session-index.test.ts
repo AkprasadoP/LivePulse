@@ -40,9 +40,7 @@ describe("sessionIndex", () => {
 
     const raw = window.localStorage.getItem(KEY);
     expect(raw).toBeTruthy();
-    expect(JSON.parse(raw!)).toMatchObject([
-      { id: "s1", name: "Physics", role: "TEACHER" },
-    ]);
+    expect(JSON.parse(raw!)).toMatchObject([{ id: "s1", name: "Physics", role: "TEACHER" }]);
   });
 
   it("removes a session by id", () => {

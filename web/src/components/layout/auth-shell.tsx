@@ -29,12 +29,10 @@ export function AuthShell({
           <Logo />
         </Link>
         <div className="max-w-md">
-          <h2 className="lp-display text-4xl leading-tight text-ink">
-            The room, in real time.
-          </h2>
+          <h2 className="lp-display text-4xl leading-tight text-ink">The room, in real time.</h2>
           <p className="mt-4 text-sm leading-relaxed text-ink-muted">
-            Quizzes that grade as answers commit, a doubt queue in the order the server accepted
-            it, and presence built from real connections.
+            Quizzes that grade as answers commit, a doubt queue in the order the server accepted it,
+            and presence built from real connections.
           </p>
           <ul className="mt-8 space-y-3 text-sm text-ink-muted">
             {[

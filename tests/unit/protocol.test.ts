@@ -189,6 +189,7 @@ describe("session recovery snapshot schema (Phase 5)", () => {
         questionId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8a",
         position: 1,
         prompt: "Capital of Germany?",
+        hasCorrectAnswer: true,
         firstCorrectWins: true,
         state: "PUBLISHED",
         acceptingAnswers: true,

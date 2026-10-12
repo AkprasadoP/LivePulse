@@ -50,9 +50,9 @@ export function QuestionPanel({
       <CardBody className="space-y-5">
         <p className="text-lg font-medium leading-snug text-ink sm:text-xl">{question.prompt}</p>
         <p className="text-xs text-ink-subtle">
-          {question.firstCorrectWins
+          {question.hasCorrectAnswer
             ? "Scored — the first correct answer wins."
-            : "Answers are recorded for this question."}
+            : "Answers are recorded for this question (not scored)."}
         </p>
         {children}
       </CardBody>

@@ -13,18 +13,10 @@ import type {
 } from "@/lib/api/types";
 import { WS_URL } from "@/lib/config";
 import { LiveSocket, type ConnectionStatus } from "@/lib/ws/client";
-import {
-  SERVER_EVENT_TYPES,
-  type ProtocolError,
-  type ProtocolErrorCode,
-} from "@/lib/ws/protocol";
+import { SERVER_EVENT_TYPES, type ProtocolError, type ProtocolErrorCode } from "@/lib/ws/protocol";
 import { useAuth } from "@/features/auth/auth-provider";
 import { useToast } from "@/components/ui/toast";
-import {
-  initialLiveSessionState,
-  reduceLiveEvent,
-  type LiveSessionState,
-} from "./live-store";
+import { initialLiveSessionState, reduceLiveEvent, type LiveSessionState } from "./live-store";
 
 export type ActionResult = { ok: true } | { ok: false; error: unknown; message: string };
 
@@ -115,9 +107,7 @@ export function useLiveSession(sessionId: string): LiveSessionController {
   const { toast } = useToast();
 
   const [status, setStatus] = useState<ConnectionStatus>("idle");
-  const [state, setState] = useState<LiveSessionState>(() =>
-    initialLiveSessionState(sessionId),
-  );
+  const [state, setState] = useState<LiveSessionState>(() => initialLiveSessionState(sessionId));
   const [sessionName, setSessionName] = useState<string | null>(null);
   const [roster, setRoster] = useState<ParticipantSummary[]>([]);
   const [quizCatalog, setQuizCatalog] = useState<QuizView[]>([]);
@@ -187,10 +177,7 @@ export function useLiveSession(sessionId: string): LiveSessionController {
     );
     const offError = socket.onProtocolError((error: ProtocolError) => {
       // Answer rejections are surfaced through the answer result, not a toast.
-      if (
-        error.code === "QUESTION_NOT_ACCEPTING_ANSWERS" ||
-        error.code === "INVALID_REQUEST"
-      ) {
+      if (error.code === "QUESTION_NOT_ACCEPTING_ANSWERS" || error.code === "INVALID_REQUEST") {
         return;
       }
       toast({ title: liveErrorText(error.code, error.message), tone: "warn" });

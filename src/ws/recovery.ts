@@ -138,6 +138,7 @@ export async function buildRecoverySnapshot(
             questionId: currentQuestion.id,
             position: currentQuestion.position,
             prompt: currentQuestion.prompt,
+            hasCorrectAnswer: currentQuestion.correctAnswer !== null,
             firstCorrectWins: currentQuestion.firstCorrectWins,
             state: currentQuestion.state as "PUBLISHED" | "CLOSED",
             acceptingAnswers: currentQuestion.state === "PUBLISHED",

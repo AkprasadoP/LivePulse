@@ -83,9 +83,8 @@ export default function LandingPage() {
               not a spreadsheet.
             </h1>
             <p className="mt-6 max-w-xl text-lg leading-relaxed text-ink-muted">
-              LivePulse turns a lesson into a live session: quizzes that grade the instant an
-              answer commits, a doubt queue that keeps its order, and presence you can actually
-              rely on.
+              LivePulse turns a lesson into a live session: quizzes that grade the instant an answer
+              commits, a doubt queue that keeps its order, and presence you can actually rely on.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link href="/register" className={buttonStyles("accent", "lg")}>

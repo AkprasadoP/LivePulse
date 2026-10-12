@@ -32,6 +32,11 @@ export class AnswerRepository {
    *     is ever persisted after the question closed (either order wins the
    *     row lock atomically — close-then-submit sees CLOSED and rejects;
    *     submit-then-close persists the answer first).
+   *   - the session state transition (LIVE -> ENDED) also conflicts: the
+   *     transaction locks the session row with FOR NO KEY UPDATE, which
+   *     conflicts with the session's conditional UPDATE (check-and-set). This
+   *     guarantees no answer is accepted after the session ends, regardless
+   *     of which transaction commits first.
    *
    * `submittedAt` ordering is NOT the winner criterion: "first" is defined
    * by which submission's transaction acquires the row lock and commits the
@@ -44,17 +49,33 @@ export class AnswerRepository {
     question: Question;
     participantId: string;
     content: string;
+    sessionId: string;
   }): Promise<
     | { outcome: "accepted"; answer: Answer }
     | { outcome: "accepted-winner"; answer: Answer }
     | { outcome: "duplicate"; answer: Answer }
-    | { outcome: "rejected"; reason: "not_accepting_answers" }
+    | { outcome: "rejected"; reason: "not_accepting_answers" | "session_ended" }
   > {
-    const { question, participantId, content } = input;
+    const { question, participantId, content, sessionId } = input;
 
     return this.prisma.$transaction(
       async (tx) => {
-        // 1. Lock the question row (FOR NO KEY UPDATE: serializes concurrent
+        // 1. Lock the session row (FOR NO KEY UPDATE: serializes with the
+        //    session state transition's conditional UPDATE). This guarantees
+        //    that no answer is accepted after the session ends — whichever
+        //    transaction commits first wins the race atomically.
+        const lockedSession = await tx.$queryRaw<Array<{ state: string }>>`
+          SELECT "state" FROM "sessions" WHERE "id" = ${sessionId} FOR NO KEY UPDATE
+        `;
+        const sessionState = lockedSession[0]?.state;
+        if (sessionState === undefined) {
+          throw new NotFoundError("Session", sessionId);
+        }
+        if (sessionState === "ENDED") {
+          return { outcome: "rejected" as const, reason: "session_ended" as const };
+        }
+
+        // 2. Lock the question row (FOR NO KEY UPDATE: serializes concurrent
         //    submitters with each other and with the close transition).
         const locked = await tx.$queryRaw<Array<{ state: string }>>`
           SELECT "state" FROM "questions" WHERE "id" = ${question.id} FOR NO KEY UPDATE
@@ -64,13 +85,13 @@ export class AnswerRepository {
           throw new NotFoundError("Question", question.id);
         }
 
-        // 2. Re-check acceptance under the lock (question may have closed
+        // 3. Re-check acceptance under the lock (question may have closed
         //    between the handler's pre-check and this transaction).
         if (questionState !== "PUBLISHED") {
           return { outcome: "rejected" as const, reason: "not_accepting_answers" as const };
         }
 
-        // 3. Duplicate detection: an existing attempt by this participant
+        // 4. Duplicate detection: an existing attempt by this participant
         //    (attemptNumber 1 in this phase) means the retry arrived after a
         //    committed first submission. Idempotent-replay: return the stored
         //    answer with its original verdict instead of a constraint error.
@@ -85,12 +106,12 @@ export class AnswerRepository {
           return { outcome: "duplicate" as const, answer: previous };
         }
 
-        // 4. Correctness is decided by the SERVER against the stored key.
+        // 5. Correctness is decided by the SERVER against the stored key.
         //    correctAnswer is nullable: null key => ungraded (isCorrect null).
         const isCorrect =
           question.correctAnswer === null ? null : content === question.correctAnswer;
 
-        // 5. Election: the first correct submission INSERTs isWinner = true.
+        // 6. Election: the first correct submission INSERTs isWinner = true.
         //    Under the lock + read-then-insert, only one transaction can reach
         //    this INSERT with isWinner true; the partial unique index is the
         //    backstop if that ever changes.
@@ -104,7 +125,7 @@ export class AnswerRepository {
           }
         }
 
-        // 6. Persist (single INSERT; the unique attempt constraint still
+        // 7. Persist (single INSERT; the unique attempt constraint still
         //    guards against any duplicate attemptNumber slipping through).
         const answer = await tx.answer.create({
           data: {

@@ -14,7 +14,12 @@ export function Avatar({
   className?: string;
   dimmed?: boolean;
 }) {
-  const dimensions = size === "xs" ? "h-6 w-6 text-[0.625rem]" : size === "sm" ? "h-8 w-8 text-xs" : "h-9 w-9 text-sm";
+  const dimensions =
+    size === "xs"
+      ? "h-6 w-6 text-[0.625rem]"
+      : size === "sm"
+        ? "h-8 w-8 text-xs"
+        : "h-9 w-9 text-sm";
   return (
     <span
       aria-hidden="true"

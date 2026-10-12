@@ -87,7 +87,11 @@ async function bringOnline(socket: LiveSocket): Promise<FakeWebSocket> {
   fake.open();
   await flush(1);
   const authFrame = fake.lastSent();
-  fake.receive({ type: "auth.authenticated", requestId: authFrame.requestId, payload: { userId: "u1" } });
+  fake.receive({
+    type: "auth.authenticated",
+    requestId: authFrame.requestId,
+    payload: { userId: "u1" },
+  });
   await flush(2);
   const joinFrame = fake.lastSent();
   fake.receive({
@@ -122,12 +126,7 @@ describe("LiveSocket connection lifecycle", () => {
     expect(fake.sent[1]!.payload).toEqual({ sessionId: "session-1" });
     expect(socket.status).toBe("connected");
     expect(socket.isJoined).toBe(true);
-    expect(statuses).toEqual([
-      "connecting",
-      "authenticating",
-      "joining",
-      "connected",
-    ]);
+    expect(statuses).toEqual(["connecting", "authenticating", "joining", "connected"]);
   });
 
   it("never puts the token in the connection URL", async () => {
@@ -237,7 +236,13 @@ describe("LiveSocket resilience", () => {
         participantId: "p1",
         role: "STUDENT",
         displayName: "Ana",
-        recovery: { quizzes: [], question: null, ownAnswer: null, standings: [], doubts: { open: [], truncated: false } },
+        recovery: {
+          quizzes: [],
+          question: null,
+          ownAnswer: null,
+          standings: [],
+          doubts: { open: [], truncated: false },
+        },
       },
     });
     await flush(2);
