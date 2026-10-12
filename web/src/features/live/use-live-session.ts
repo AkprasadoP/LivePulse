@@ -382,9 +382,9 @@ export function useLiveSession(sessionId: string): LiveSessionController {
   );
 
   const resolveDoubt = useCallback(
-    async (doubtId: string) => {
+    async (doubtId: string, explanation: string) => {
       try {
-        await socketRequest("doubt.resolve", { doubtId });
+        await socketRequest("doubt.resolve", { doubtId, explanation });
         return ok;
       } catch (error) {
         return { ok: false as const, error, message: describeActionError(error) };

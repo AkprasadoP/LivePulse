@@ -228,6 +228,7 @@ model Answer {
 ///
 /// `doubtRequestId` is an optional client idempotency key: a retried create
 /// with the same key resolves to the existing row (checked in-transaction).
+/// `explanation` is the teacher's resolution text; populated when status = RESOLVED.
 model Doubt {
   id             String      @id @default(uuid(7))
   sessionId      String
@@ -239,6 +240,8 @@ model Doubt {
   /// Optional client idempotency key (partial unique index in the migration).
   doubtRequestId String?     @db.VarChar(64)
   status         DoubtStatus @default(OPEN)
+  /// Teacher's explanation when resolved; null for OPEN/DISMISSED.
+  explanation    String?     @db.Text
   resolvedAt     DateTime?   @db.Timestamptz(6)
   createdAt      DateTime    @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime    @updatedAt @db.Timestamptz(6)

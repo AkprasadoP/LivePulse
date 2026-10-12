@@ -306,7 +306,19 @@ export function reduceLiveEvent(state: LiveSessionState, event: LiveEvent): Live
       return { ...state, doubts: upsertDoubt(state.doubts, doubt) };
     }
 
-    case "doubt.resolved":
+    case "doubt.resolved": {
+      const doubtId = payload.doubtId as string;
+      const explanation = payload.explanation as string | undefined;
+      return {
+        ...state,
+        doubts: state.doubts.map((d) =>
+          d.doubtId === doubtId
+            ? { ...d, status: "RESOLVED", explanation: explanation ?? null }
+            : d,
+        ),
+      };
+    }
+
     case "doubt.dismissed": {
       const doubtId = payload.doubtId as string;
       return { ...state, doubts: state.doubts.filter((d) => d.doubtId !== doubtId) };

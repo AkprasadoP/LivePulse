@@ -30,3 +30,5 @@ load-tests/load-smoke.sh
 
 # Tool-local metadata (Kilo worktree markers, etc.)
 .kilo/
+.vercel
+.env*

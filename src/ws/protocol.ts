@@ -93,7 +93,10 @@ export const doubtCreateSchema = z.strictObject({
   clientDoubtId: z.string().min(1).max(64).optional(),
 });
 
-export const doubtResolveSchema = z.strictObject({ doubtId: z.uuid() });
+export const doubtResolveSchema = z.strictObject({
+  doubtId: z.uuid(),
+  explanation: z.string().min(1).max(2_000),
+});
 export const doubtDismissSchema = z.strictObject({ doubtId: z.uuid() });
 export const doubtQueueListSchema = z.strictObject({});
 
@@ -150,6 +153,7 @@ export const leaderboardEntrySchema = z.object({
  * `doubt.queue.updated` snapshot and the Phase 5 recovery snapshot — so a
  * doubt has exactly one wire shape everywhere. `enqueueSeq` is the ordering
  * authority; `priority` is server-controlled (bump deferred).
+ * `explanation` is present only when status = RESOLVED.
  */
 export const doubtViewSchema = z.object({
   doubtId: z.uuid(),
@@ -160,6 +164,7 @@ export const doubtViewSchema = z.object({
   enqueueSeq: z.number().int(),
   status: z.enum(["OPEN", "RESOLVED", "DISMISSED"]),
   createdAt: z.string().datetime(),
+  explanation: z.string().nullable().optional(),
 });
 export type DoubtView = z.infer<typeof doubtViewSchema>;
 
@@ -306,6 +311,7 @@ export const doubtResolvedPayloadSchema = z.object({
   doubtId: z.uuid(),
   status: z.literal("RESOLVED"),
   resolvedAt: z.string().datetime(),
+  explanation: z.string(),
 });
 
 /** Session broadcast on `doubt.dismiss`. */

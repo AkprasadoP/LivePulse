@@ -35,6 +35,7 @@ function toDoubtView(doubt: Doubt, displayName: string): DoubtView {
     enqueueSeq: doubt.enqueueSeq,
     status: doubt.status,
     createdAt: doubt.createdAt.toISOString(),
+    explanation: doubt.explanation ?? null,
   };
 }
 
@@ -102,9 +103,10 @@ export async function handleDoubtCreate(
     { sessionId, doubtId: result.doubt.id, enqueueSeq: result.doubt.enqueueSeq },
     "WebSocket doubt created",
   );
-  // COMMIT succeeded -> local broadcast (echoing requestId, like the other
-  // mutating broadcasts) -> post-commit Redis notice.
-  broadcast(deps, sessionId, doubtCreatedMessage(requestId, { sessionId, doubt: view }));
+  // Private response to the creator (correlated by requestId)
+  send(connection, doubtCreatedMessage(requestId, { sessionId, doubt: view }), deps.log);
+  // Broadcast to session (server-initiated, requestId = null)
+  broadcast(deps, sessionId, doubtCreatedMessage(null, { sessionId, doubt: view }));
   deps.distributor?.publish({
     type: "doubt.created",
     sessionId,
@@ -112,14 +114,21 @@ export async function handleDoubtCreate(
   });
 }
 
-/** doubt.resolve — TEACHER only; OPEN -> RESOLVED, atomic. */
+/** doubt.resolve — TEACHER only; OPEN -> RESOLVED, atomic. Requires explanation. */
 export async function handleDoubtResolve(
   connection: Connection,
-  payload: { doubtId: string },
+  payload: { doubtId: string; explanation: string },
   requestId: string,
   deps: HandlerDependencies,
 ): Promise<void> {
-  await transitionDoubt(connection, payload.doubtId, "RESOLVED", requestId, deps);
+  await transitionDoubt(
+    connection,
+    payload.doubtId,
+    "RESOLVED",
+    requestId,
+    deps,
+    payload.explanation,
+  );
 }
 
 /** doubt.dismiss — TEACHER only; OPEN -> DISMISSED, atomic. */
@@ -138,6 +147,7 @@ async function transitionDoubt(
   to: "RESOLVED" | "DISMISSED",
   requestId: string,
   deps: HandlerDependencies,
+  explanation?: string,
 ): Promise<void> {
   const sessionId = connection.joinedSessionId;
   if (sessionId === null) return;
@@ -150,8 +160,43 @@ async function transitionDoubt(
     throw new NotFoundError("Doubt", doubtId);
   }
 
+  // Teacher check must happen before explanation validation to preserve
+  // the existing error codes (TEACHER_REQUIRED, DOUBT_NOT_FOUND).
+  if (connection.participantRole !== "TEACHER") {
+    sendProtocolError(
+      connection,
+      requestId,
+      {
+        code: "TEACHER_REQUIRED",
+        message: "Only the session teacher can resolve or dismiss doubts",
+        details: null,
+      },
+      deps.log,
+    );
+    return;
+  }
+
+  // Validate explanation for RESOLVED
+  if (to === "RESOLVED") {
+    if (!explanation || explanation.trim().length === 0) {
+      sendProtocolError(
+        connection,
+        requestId,
+        {
+          code: "INVALID_REQUEST",
+          message: "An explanation is required to resolve a doubt",
+          details: {
+            issues: [{ path: "payload.explanation", message: "Explanation cannot be empty" }],
+          },
+        },
+        deps.log,
+      );
+      return;
+    }
+  }
+
   const transitionStarted = performance.now();
-  const updated = await deps.doubtRepository.transitionStatus(doubtId, sessionId, to);
+  const updated = await deps.doubtRepository.transitionStatus(doubtId, sessionId, to, explanation);
   deps.log.metrics?.doubtOperationDuration.observe(
     { operation: to === "RESOLVED" ? "resolve" : "dismiss" },
     (performance.now() - transitionStarted) / 1000,
@@ -177,23 +222,48 @@ async function transitionDoubt(
   const resolvedAt = (updated.resolvedAt ?? new Date()).toISOString();
   deps.log.info({ sessionId, doubtId, status: to }, "WebSocket doubt transitioned");
 
+  // Private response to the requesting teacher (correlated by requestId)
   if (to === "RESOLVED") {
+    send(
+      connection,
+      doubtResolvedMessage(requestId, {
+        sessionId,
+        doubtId,
+        status: to,
+        resolvedAt,
+        explanation: explanation!,
+      }),
+      deps.log,
+    );
+    // Broadcast to session (server-initiated, requestId = null)
     broadcast(
       deps,
       sessionId,
-      doubtResolvedMessage(requestId, { sessionId, doubtId, status: to, resolvedAt }),
+      doubtResolvedMessage(null, {
+        sessionId,
+        doubtId,
+        status: to,
+        resolvedAt,
+        explanation: explanation!,
+      }),
     );
     deps.distributor?.publish({
       type: "doubt.resolved",
       sessionId,
-      payload: { sessionId, doubtId, status: to, resolvedAt },
+      payload: { sessionId, doubtId, status: to, resolvedAt, explanation: explanation! },
     });
     return;
   }
+  // DISMISSED
+  send(
+    connection,
+    doubtDismissedMessage(requestId, { sessionId, doubtId, status: to, resolvedAt }),
+    deps.log,
+  );
   broadcast(
     deps,
     sessionId,
-    doubtDismissedMessage(requestId, { sessionId, doubtId, status: to, resolvedAt }),
+    doubtDismissedMessage(null, { sessionId, doubtId, status: to, resolvedAt }),
   );
   deps.distributor?.publish({
     type: "doubt.dismissed",

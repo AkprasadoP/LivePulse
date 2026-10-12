@@ -311,7 +311,11 @@ describe("Observability (integration, Phase 7)", () => {
         (m) => m.type === "doubt.created" && m.requestId === "d1",
       );
       const doubtId = (doubtFrame.payload as { doubt: { doubtId: string } }).doubt.doubtId;
-      teacher.send({ type: "doubt.resolve", requestId: "d2", payload: { doubtId } });
+      teacher.send({
+        type: "doubt.resolve",
+        requestId: "d2",
+        payload: { doubtId, explanation: "Test explanation" },
+      });
       await teacher.waitFor((m) => m.type === "doubt.resolved" && m.requestId === "d2");
 
       const text = await scrape(instance);

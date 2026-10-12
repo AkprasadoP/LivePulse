@@ -108,8 +108,11 @@ export class AnswerRepository {
 
         // 5. Correctness is decided by the SERVER against the stored key.
         //    correctAnswer is nullable: null key => ungraded (isCorrect null).
+        //    For text answers, comparison is case-insensitive (Stack == stack == STACK).
         const isCorrect =
-          question.correctAnswer === null ? null : content === question.correctAnswer;
+          question.correctAnswer === null
+            ? null
+            : content.trim().toLowerCase() === question.correctAnswer.trim().toLowerCase();
 
         // 6. Election: the first correct submission INSERTs isWinner = true.
         //    Under the lock + read-then-insert, only one transaction can reach

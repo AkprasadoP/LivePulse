@@ -303,7 +303,12 @@ export async function handleClientEnvelope(
         );
         return;
       case "doubt.resolve":
-        await handleDoubtResolve(connection, payload as { doubtId: string }, requestId, deps);
+        await handleDoubtResolve(
+          connection,
+          payload as { doubtId: string; explanation: string },
+          requestId,
+          deps,
+        );
         return;
       case "doubt.dismiss":
         await handleDoubtDismiss(connection, payload as { doubtId: string }, requestId, deps);

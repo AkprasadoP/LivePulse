@@ -29,7 +29,7 @@ export function DoubtQueuePanel({
   doubts: DoubtView[];
   truncated: boolean;
   canModerate: boolean;
-  onResolve: (doubtId: string) => Promise<ActionResult>;
+  onResolve: (doubtId: string, explanation: string) => Promise<ActionResult>;
   onDismiss: (doubtId: string) => Promise<ActionResult>;
   onRefresh: () => Promise<ActionResult>;
   children?: React.ReactNode;
@@ -37,11 +37,23 @@ export function DoubtQueuePanel({
 }) {
   const now = useNow(15_000);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [explanation, setExplanation] = useState("");
 
   async function run(id: string, action: (doubtId: string) => Promise<ActionResult>) {
     setBusyId(id);
     await action(id);
     setBusyId(null);
+  }
+
+  async function handleResolve(id: string) {
+    const trimmed = explanation.trim();
+    if (trimmed.length === 0) return;
+    setBusyId(id);
+    await onResolve(id, trimmed);
+    setBusyId(null);
+    setResolvingId(null);
+    setExplanation("");
   }
 
   return (
@@ -83,16 +95,56 @@ export function DoubtQueuePanel({
                   <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-ink-muted">
                     {doubt.content}
                   </p>
-                  {canModerate ? (
+                  {doubt.status === "RESOLVED" && doubt.explanation ? (
+                    <div className="mt-2 p-2 rounded-sm border border-live/30 bg-live-soft text-sm text-live">
+                      <span className="font-medium">Resolution:</span> {doubt.explanation}
+                    </div>
+                  ) : null}
+                  {canModerate && doubt.status === "OPEN" ? (
                     <div className="mt-2 flex gap-2">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        loading={busyId === doubt.doubtId}
-                        onClick={() => void run(doubt.doubtId, onResolve)}
-                      >
-                        Resolve
-                      </Button>
+                      {resolvingId === doubt.doubtId ? (
+                        <>
+                          <Textarea
+                            value={explanation}
+                            onChange={(event) => setExplanation(event.target.value)}
+                            placeholder="Enter explanation (required)..."
+                            maxLength={2000}
+                            className="flex-1 min-h-16"
+                            aria-label="Resolution explanation"
+                            autoFocus
+                          />
+                          <Button
+                            size="sm"
+                            variant="accent"
+                            loading={busyId === doubt.doubtId}
+                            onClick={() => handleResolve(doubt.doubtId)}
+                          >
+                            Resolve with explanation
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setResolvingId(null);
+                              setExplanation("");
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          loading={busyId === doubt.doubtId}
+                          onClick={() => {
+                            setResolvingId(doubt.doubtId);
+                            setExplanation("");
+                          }}
+                        >
+                          Resolve
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         variant="ghost"

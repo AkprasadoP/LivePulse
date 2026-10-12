@@ -122,7 +122,7 @@ describe("Doubt queue (integration, Phase 6)", () => {
       },
     });
     // The teacher (same instance) observes the broadcast too.
-    await teacher.waitFor((m) => m.type === "doubt.created" && m.requestId === "d1");
+    await teacher.waitFor((m) => m.type === "doubt.created" && m.requestId === null);
 
     const rows = await prisma.doubt.findMany({ where: { sessionId } });
     expect(rows).toHaveLength(1);
@@ -286,15 +286,30 @@ describe("Doubt queue (integration, Phase 6)", () => {
     const created = await watcher.waitFor((m) => m.type === "doubt.created" && m.requestId === "c");
     const doubtId = (created.payload as { doubt: { doubtId: string } }).doubt.doubtId;
 
-    teacher1.send({ type: "doubt.resolve", requestId: "r1", payload: { doubtId } });
-    teacher2.send({ type: "doubt.resolve", requestId: "r2", payload: { doubtId } });
+    teacher1.send({
+      type: "doubt.resolve",
+      requestId: "r1",
+      payload: { doubtId, explanation: "Test explanation" },
+    });
+    teacher2.send({
+      type: "doubt.resolve",
+      requestId: "r2",
+      payload: { doubtId, explanation: "Test explanation 2" },
+    });
 
     // Both eventually observe the terminal state; exactly one of them got the
-    // DOUBT_NOT_OPEN rejection.
+    // DOUBT_NOT_OPEN rejection. We must wait for the specific requestId to avoid
+    // matching the session broadcast that both teachers receive.
     const [res1, res2] = await Promise.all([
-      teacher1.waitFor((m) => m.type === "doubt.resolved" || m.type === "error"),
-      teacher2.waitFor((m) => m.type === "doubt.resolved" || m.type === "error"),
+      teacher1.waitFor(
+        (m) => (m.type === "doubt.resolved" || m.type === "error") && m.requestId === "r1",
+      ),
+      teacher2.waitFor(
+        (m) => (m.type === "doubt.resolved" || m.type === "error") && m.requestId === "r2",
+      ),
     ]);
+    console.log("Q6 res1:", JSON.stringify(res1));
+    console.log("Q6 res2:", JSON.stringify(res2));
     const errors = [res1, res2].filter(
       (m) => m.type === "error" && m.payload.code === "DOUBT_NOT_OPEN",
     );
@@ -326,11 +341,19 @@ describe("Doubt queue (integration, Phase 6)", () => {
     );
     const doubtId = (created.payload as { doubt: { doubtId: string } }).doubt.doubtId;
 
-    teacher1.send({ type: "doubt.resolve", requestId: "r1", payload: { doubtId } });
+    teacher1.send({
+      type: "doubt.resolve",
+      requestId: "r1",
+      payload: { doubtId, explanation: "Resolving with explanation" },
+    });
     teacher2.send({ type: "doubt.dismiss", requestId: "d2", payload: { doubtId } });
     await Promise.all([
-      teacher1.waitFor((m) => m.type === "doubt.resolved" || m.type === "error"),
-      teacher2.waitFor((m) => m.type === "doubt.dismissed" || m.type === "error"),
+      teacher1.waitFor(
+        (m) => (m.type === "doubt.resolved" || m.type === "error") && m.requestId === "r1",
+      ),
+      teacher2.waitFor(
+        (m) => (m.type === "doubt.dismissed" || m.type === "error") && m.requestId === "d2",
+      ),
     ]);
 
     // Exactly one terminal status on the single row.
@@ -357,7 +380,11 @@ describe("Doubt queue (integration, Phase 6)", () => {
     const created = await s1.waitFor((m) => m.type === "doubt.created" && m.requestId === "c");
     const doubtId = (created.payload as { doubt: { doubtId: string } }).doubt.doubtId;
 
-    s2.send({ type: "doubt.resolve", requestId: "bad", payload: { doubtId } });
+    s2.send({
+      type: "doubt.resolve",
+      requestId: "bad",
+      payload: { doubtId, explanation: "Student attempting to resolve" },
+    });
     const error = await s2.waitFor((m) => m.type === "error");
     expect(error.payload).toMatchObject({ code: "TEACHER_REQUIRED" });
 
@@ -384,7 +411,11 @@ describe("Doubt queue (integration, Phase 6)", () => {
     const doubtId = (created.payload as { doubt: { doubtId: string } }).doubt.doubtId;
 
     // Teacher of session B tries to resolve a doubt that belongs to session A.
-    teacherB.send({ type: "doubt.resolve", requestId: "bad", payload: { doubtId } });
+    teacherB.send({
+      type: "doubt.resolve",
+      requestId: "bad",
+      payload: { doubtId, explanation: "Cross-session attempt" },
+    });
     const error = await teacherB.waitFor((m) => m.type === "error");
     expect(error.payload).toMatchObject({ code: "DOUBT_NOT_FOUND" });
 
@@ -500,8 +531,14 @@ describe("Doubt queue (integration, Phase 6)", () => {
     );
     const doubtId = (created.payload as { doubt: { doubtId: string } }).doubt.doubtId;
 
-    teacherA.send({ type: "doubt.resolve", requestId: "r", payload: { doubtId } });
-    const resolved = await studentB.waitFor((m) => m.type === "doubt.resolved");
+    teacherA.send({
+      type: "doubt.resolve",
+      requestId: "r",
+      payload: { doubtId, explanation: "Remote resolution" },
+    });
+    const resolved = await studentB.waitFor(
+      (m) => m.type === "doubt.resolved" && m.requestId === null,
+    );
     expect(resolved.payload).toMatchObject({ sessionId, doubtId, status: "RESOLVED" });
 
     await teacherA.close();

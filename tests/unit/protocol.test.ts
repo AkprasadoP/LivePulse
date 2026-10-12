@@ -95,7 +95,10 @@ describe("doubt queue schemas (Phase 6)", () => {
 
   it("doubt.resolve requires a UUID doubtId", () => {
     expect(
-      doubtResolveSchema.safeParse({ doubtId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f" }).success,
+      doubtResolveSchema.safeParse({
+        doubtId: "018f3c2e-7b1a-7d0e-9c2f-3a4b5c6d7e8f",
+        explanation: "Test explanation",
+      }).success,
     ).toBe(true);
     expect(doubtResolveSchema.safeParse({ doubtId: "nope" }).success).toBe(false);
   });

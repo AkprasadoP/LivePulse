@@ -98,15 +98,24 @@ export class DoubtRepository {
    * is the concurrency guarantee: exactly one of two concurrent teachers (or a
    * resolve racing a dismiss) transitions the row; the loser gets null.
    * `resolvedAt` is the terminal timestamp for both outcomes.
+   * `explanation` is required for RESOLVED, ignored for DISMISSED.
    */
   public async transitionStatus(
     doubtId: string,
     sessionId: string,
     to: "RESOLVED" | "DISMISSED",
+    explanation?: string,
   ): Promise<Doubt | null> {
+    const data: { status: "RESOLVED" | "DISMISSED"; resolvedAt: Date; explanation?: string } = {
+      status: to,
+      resolvedAt: new Date(),
+    };
+    if (to === "RESOLVED" && explanation !== undefined) {
+      data.explanation = explanation;
+    }
     const updated = await this.prisma.doubt.updateMany({
       where: { id: doubtId, sessionId, status: "OPEN" },
-      data: { status: to, resolvedAt: new Date() },
+      data,
     });
     if (updated.count !== 1) return null;
     return this.prisma.doubt.findUnique({ where: { id: doubtId } });

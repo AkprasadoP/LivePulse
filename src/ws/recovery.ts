@@ -155,6 +155,7 @@ export async function buildRecoverySnapshot(
         enqueueSeq: doubt.enqueueSeq,
         status: doubt.status,
         createdAt: doubt.createdAt.toISOString(),
+        explanation: doubt.explanation ?? null,
       })),
       truncated: openDoubtCount > openDoubts.length,
     },
