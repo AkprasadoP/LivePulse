@@ -79,15 +79,37 @@ pnpm db:test:setup  # one-time: create/migrate livepulse_test
 pnpm test:integration
 ```
 
-## Not covered here (covered elsewhere / later)
+Manual smoke against a running dev server (`pnpm dev` on :3000):
+
+```bash
+node -e '
+const WebSocket = require("ws"); // pnpm exec node, or use an .mjs script
+const ws = new WebSocket("ws://localhost:3000/ws");
+ws.on("open", () => ws.send(JSON.stringify({ type: "session.join", requestId: "r1", payload: { sessionId: "<uuid>" } })));
+ws.on("message", (m) => console.log(m.toString()));
+'
+```
+
+A plain HTTP request gets the documented response:
+
+```bash
+curl -s http://localhost:3000/ws
+# → {"statusCode":426,"error":"Upgrade Required",...}
+```
+
+## Not covered here (covered elsewhere)
 
 - Reconnect/recovery semantics — covered by `docs/testing/recovery.md`
   (`tests/integration/recovery.test.ts`).
-- Dockerized multi-instance behavior — cross-instance distribution is
-  already covered by `distributed.test.ts` with two independent in-process
-  instances; containerized instances + Nginx arrive in a later phase.
-- Load/backpressure behavior (k6, later phase).
-- Authentication on the upgrade path (auth phase).
+- Dockerized multi-instance behavior — covered by
+  `docs/architecture/production.md` (two app containers behind Nginx);
+  `distributed.test.ts` covers the same propagation with two independent
+  in-process instances.
+- Load/backpressure behavior — `load-tests/README.md` (standalone
+  harness) and `tests/integration/ws-backpressure.test.ts` (paced
+  slow-consumer stages with safety tripwires).
+- Upgrade-path authentication — `auth.authenticate` before `session.join`
+  (`docs/api/authentication.md`, `tests/integration/ws-auth.test.ts`).
 
 ---
 
