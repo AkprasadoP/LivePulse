@@ -337,6 +337,57 @@ describe("Cross-instance distribution (integration)", () => {
       expect(winners).toBe(1);
       const total = await prisma.answer.count({ where: { questionId: scenario.questionId } });
       expect(total).toBe(20);
+      const winnerRow = await prisma.answer.findFirst({
+        where: { questionId: scenario.questionId, isWinner: true },
+      });
+      expect(winnerRow?.isCorrect).toBe(true);
+      const dbWinnerParticipantId = winnerRow!.participantId;
+
+      // Client-visible winner consistency: every submission gets a targeted
+      // verdict correlated to its own requestId, exactly one says isWinner,
+      // and it names the DB winner — regardless of which instance served it.
+      const verdicts = await Promise.all(
+        clients.map((client, index) =>
+          client.waitFor(
+            (m) => m.type === "answer.accepted" && m.requestId === `a-${index}`,
+            10_000,
+          ),
+        ),
+      );
+      const winnerVerdicts = verdicts.filter(
+        (v) => (v.payload as { isWinner: boolean }).isWinner === true,
+      );
+      expect(winnerVerdicts).toHaveLength(1);
+      expect((winnerVerdicts[0]!.payload as { participantId: string }).participantId).toBe(
+        dbWinnerParticipantId,
+      );
+
+      // Relevant cross-instance delivery in the race itself: a non-empty
+      // leaderboard naming the DB winner reaches both the WS-A teacher and a
+      // WS-B racer (clients[1] joined WS-B by the i % 2 split). Awaited, not slept.
+      const teacherBoard = await teacher.waitFor(
+        (m) =>
+          m.type === "leaderboard.updated" &&
+          Array.isArray((m.payload as { standings: unknown[] }).standings) &&
+          (m.payload as { standings: unknown[] }).standings.length > 0,
+        10_000,
+      );
+      const remoteBoard = await clients[1]!.waitFor(
+        (m) =>
+          m.type === "leaderboard.updated" &&
+          Array.isArray((m.payload as { standings: unknown[] }).standings) &&
+          (m.payload as { standings: unknown[] }).standings.length > 0,
+        10_000,
+      );
+      for (const board of [teacherBoard, remoteBoard]) {
+        const standings = (
+          board.payload as { standings: Array<{ participantId: string; isWinner: boolean }> }
+        ).standings;
+        expect(standings.filter((s) => s.isWinner).length).toBeLessThanOrEqual(1);
+        for (const row of standings.filter((s) => s.isWinner)) {
+          expect(row.participantId).toBe(dbWinnerParticipantId);
+        }
+      }
     } finally {
       await Promise.allSettled(clients.map((c) => c.close()));
       await teacher.close();
