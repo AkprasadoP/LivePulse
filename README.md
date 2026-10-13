@@ -11,6 +11,49 @@ Auth: `docs/api/authentication.md` ·
 WS protocol: `docs/api/websocket-protocol.md` · Schema:
 `docs/database/schema.md` · Decisions: `docs/decisions/`.
 
+## How an answer travels (two instances)
+
+Normal path — student on WS-B answers, teacher on WS-A observes:
+
+```mermaid
+sequenceDiagram
+    participant Student as Student (WS-B)
+    participant Origin as WS-B (origin)
+    participant PG as PostgreSQL
+    participant Redis as Redis Pub/Sub
+    participant Peer as WS-A
+    participant Teacher as Teacher (WS-A)
+    Student->>Origin: quiz.answer
+    Origin->>Origin: validate membership, question, session
+    Origin->>PG: transaction: lock rows, elect at most one winner, INSERT
+    PG-->>Origin: commit (durable)
+    Origin->>Student: answer.accepted (targeted, requestId echoed)
+    Origin->>Origin: broadcast answer.accepted + leaderboard.updated (local clients)
+    Origin->>Redis: publish answer.accepted + leaderboard.updated
+    Redis-->>Peer: deliver notices (at-most-once)
+    Peer->>Teacher: answer.accepted + leaderboard.updated
+```
+
+Reconnect recovery — any instance serves the same snapshot from PostgreSQL:
+
+```mermaid
+sequenceDiagram
+    participant Client as Client
+    participant Any as Any WS instance
+    participant PG as PostgreSQL
+    Client->>Any: session.join
+    Any->>PG: read snapshot (quizzes, question, own answer, standings, doubts)
+    PG-->>Any: authoritative state
+    Any->>Client: session.joined + recovery
+    Note over Client: restores state from snapshot;<br/>missed events are not replayed
+```
+
+> Failure window: if the origin crashes after the PostgreSQL commit but
+> before the Redis publish, remote connected clients miss the notification.
+> Rejoining repairs state through the PostgreSQL snapshot; automatic
+> reconciliation for already-connected clients is not implemented. No
+> transactional outbox exists.
+
 ## Current implementation status
 
 **Phases 1–11 complete** (foundation → real-time classroom → distributed
@@ -43,8 +86,8 @@ authentication → Phase 11 security hardening):
   simultaneous correct answers (the 100 race repeated 3×) and a mixed
   correct/incorrect run — exactly one winner on every run
   (`docs/testing/concurrency.md`)
-- Vitest suites: 84 unit tests + 174 integration tests against real
-  PostgreSQL, real Redis and real WebSocket clients
+- Vitest suites: 84 unit tests + 198 integration tests (23 files)
+  against real PostgreSQL, real Redis and real WebSocket clients
 - **Phase 4 — distributed WebSockets (implemented)**: inter-instance event
   distribution over Redis Pub/Sub, strictly as post-commit event notices on a
   single global channel — PostgreSQL stays the sole source of truth, winner
@@ -123,6 +166,94 @@ authentication → Phase 11 security hardening):
 multi-instance compose (tests spawn independent in-process instances today),
 Grafana dashboards/alerting, OpenTelemetry tracing, k6 load testing,
 attendance history. Do not assume any of this exists.
+
+## Guarantees and limitations
+
+Labels: **code** = inspected in source, **tests** = verified by suites
+below, **measured** = observed in the benchmark below, **untested** =
+known gap, stated as hypothesis rather than claim.
+
+**Holds (code + tests):**
+
+- PostgreSQL is the durable source of truth; Redis never owns business
+  data (**code**: repositories, `distribution.ts` receive path is
+  read-only; **tests**: `db-constraints`, recovery suites).
+- Winner election serializes on a question row lock (`FOR NO KEY UPDATE`)
+  with a partial unique index enforcing at most one winner per question
+  (**code**: `answer.repository.ts`, migration
+  `20260922191225_phase3_quiz_and_winner`; **tests**: 10/50/100 + mixed
+  races, cross-instance 20-way race).
+- Duplicate submissions replay the stored answer verdict (same
+  `isCorrect`/`isWinner`/`attemptNumber`), persist no second row, and emit
+  no re-broadcast (**code**: repository duplicate branch + handler early
+  return; **tests**: same-content and different-content retry tests).
+- Reconnect snapshots are read purely from PostgreSQL on every
+  `session.join` and carry quizzes, current question, own answer,
+  standings, and open doubts (**code**: `recovery.ts`,
+  `handleSessionJoin`; **tests**: R1–R11).
+- Heartbeat cleanup terminates dead peers and releases per-session
+  bookkeeping (**code**: `ws.plugin.ts` sweep + `close` path; **tests**:
+  heartbeat, P12, heartbeat-close counter).
+- Redis Pub/Sub carries post-commit cross-instance notifications only,
+  published after commit and local broadcast (**code**:
+  `quiz-handlers.ts`, `distribution.ts`).
+
+**Limitations (do not rely on these):**
+
+- Redis application events are **at-most-once**: no durable outbox, replay
+  log, acknowledgement, or retry exists (**code**-inspected; stated as
+  architecture, not as a tested guarantee).
+- A commit-before-publish crash can leave already-connected remote clients
+  stale until another relevant event arrives or they rejoin (**code**-inspected
+  gap; **untested** as a dedicated crash-injection case — the staying-connected
+  path has no automatic reconciliation by design).
+- No outbound WebSocket `bufferedAmount` high-water mark or bounded queue
+  is implemented (**code**-inspected; slow-reader behavior **unmeasured**).
+- Slow-reader/broadcast-storm and answer-storm behavior has **not** been
+  benchmarked (**untested**).
+- The load numbers below are a local join-only baseline (≤100 concurrent),
+  not capacity, throughput limits, or production behavior (**measured**, narrowly scoped).
+
+## Benchmark report (measured, local join-only baseline)
+
+Command pattern:
+
+```bash
+node load-tests/run.js --vus {10,25,50,100} --duration 20s --scenario websocket-connections
+```
+
+Environment: macOS M2, 16 GB RAM · Node.js v26.3.0 · PostgreSQL 17 and
+Redis 7 via Docker Compose · same-machine generator and development
+server · real WebSocket connections, one `session.join` /
+`session.joined` round-trip per virtual user.
+
+| VUs | Connections succeeded | Failed | Establishment p50/p95/p99 (ms) | Join RTT p50/p95/p99 (ms) |
+| --: | --------------------: | -----: | ------------------------------ | ------------------------- |
+|  10 |                    10 |      0 | 8.68 / 8.88 / 8.99             | 61.50 / 69.02 / 69.16     |
+|  25 |                    25 |      0 | 13.41 / 13.75 / 13.84          | 74.74 / 90.10 / 90.47     |
+|  50 |                    50 |      0 | 31.32 / 32.57 / 32.57          | 57.47 / 62.54 / 62.69     |
+| 100 |                   100 |      0 | 48.69 / 50.02 / 50.10          | 86.31 / 89.70 / 89.94     |
+
+All runs reported valid measurements with zero timeouts, protocol errors,
+and unexpected closes. Health checks remained successful, and the active
+WebSocket gauge returned to zero after each run. Raw result JSON lives
+under gitignored `load-tests/results/`.
+
+Limitations, stated plainly beside the numbers: join-only workload
+(connect + one join, no answers, no broadcasts under load); ≤100
+concurrent connections on one shared dev machine; single run per level.
+This describes a local baseline — not production capacity, maximum
+concurrency, sustained throughput, answer-storm, or broadcast-storm
+behavior. The non-monotonic join-RTT curve across levels is reported
+without a bottleneck attribution.
+
+## Test evidence (reported results, not rerun here)
+
+- Most recent full integration run: 22 files, 192 passing tests.
+- Focused recovery tests: 13 passing.
+- Distributed plus answer-correctness tests: 13 passing.
+- WebSocket session, presence, and observability tests: 32 passing.
+- TypeScript typecheck was clean.
 
 ## Stack (as of Phase 7)
 
@@ -290,6 +421,59 @@ A plain HTTP request gets the documented response:
 curl -s http://localhost:3000/ws
 # → {"statusCode":426,"error":"Upgrade Required",...}
 ```
+
+## Testing & benchmarking
+
+Layout: `tests/unit/` holds isolated unit tests (no I/O);
+`tests/integration/` holds suites against real PostgreSQL + Redis +
+WebSocket clients, sharing one `tests/integration/helpers.ts`
+(server boot, `WsTestClient`, scenario setup). Integration files run
+sequentially in one fork so `TRUNCATE` between tests cannot race another
+suite (`vitest.integration.config.ts`).
+
+Integration tests need the compose dependencies and the test database:
+
+```bash
+pnpm db:up            # PostgreSQL on 5433, Redis on 6380
+pnpm db:test:setup    # one-time: create livepulse_test + apply migrations
+pnpm test:unit
+pnpm test:integration # or pnpm test:all for both
+```
+
+What lives where (each file covers distinct behavior or failure modes):
+
+- Correctness races: `concurrency.test.ts` (10/50/100 + mixed
+  first-correct-wins), `answer-correctness.test.ts` (verdict correlation,
+  full broadcast sequence, different-content retries, answer-vs-close),
+  `quiz-flow.test.ts` (lifecycle, grading, duplicates, rejection paths).
+- Distribution & recovery: `distributed.test.ts` (cross-instance delivery,
+  race, degradation), `recovery.test.ts` (R1–R11 snapshots + edge cases).
+- Domain: `doubt-queue.test.ts` (ordering, races, idempotency),
+  `db-constraints.test.ts`, `sessions-api.test.ts`, `quizzes-api.test.ts`,
+  `session-state.test.ts`, `auth*.test.ts`, `http-authz.test.ts`.
+- Transport & ops: `ws-*.test.ts` (protocol, session, connection,
+  heartbeat, auth, measurement invariants), `presence.test.ts`,
+  `observability.test.ts`, `readiness.test.ts`.
+- Backpressure experiments: `ws-backpressure.test.ts` (calibration,
+  slow-reader, large-payload, split-instance stages with safety trips).
+
+Backpressure focused run (safe: local instances, modest paced load,
+event-awaited completion, 8 MB buffer / 100 MB RSS tripwires):
+
+```bash
+pnpm vitest run --config vitest.integration.config.ts tests/integration/ws-backpressure.test.ts
+```
+
+Standalone load harness (local dev server only, never production —
+`load-tests/README.md` documents the safety rules and result format):
+
+```bash
+node load-tests/run.js --vus {10,25,50,100} --duration 20s --scenario websocket-connections
+```
+
+Measured numbers in this README are local join-only baselines (see
+Benchmark report); hypotheses and untested areas are labeled as such in
+Guarantees and limitations.
 
 ## Documentation
 
