@@ -49,7 +49,7 @@ sequenceDiagram
     Any->>PG: read snapshot (quizzes, question, own answer, standings, doubts)
     PG-->>Any: authoritative state
     Any->>Client: session.joined + recovery
-    Note over Client: restores state from snapshot;<br/>missed events are not replayed
+    Note over Client: restores state from snapshot,<br/>missed events are not replayed
 ```
 
 > Failure window: if the origin crashes after the PostgreSQL commit but
