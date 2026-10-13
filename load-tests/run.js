@@ -395,90 +395,242 @@ function httpRequestRunner(scenario, options) {
 // ---------------------------------------------------------------------------
 
 function websocketScenario(options) {
-  return new Promise((resolve) => {
+  return new Promise(async (resolve) => {
+    // Phase 1: Create a real session via HTTP (setup, outside measured window)
+    // Reuse the same pattern as HTTP scenario: register a creator, create session
+    const base = new URL(BASE_URL);
+    const hostname = base.hostname;
+    const port = Number(base.port || (base.protocol === "https:" ? 443 : 80));
+
+    let accessToken = null;
+    let sessionId = null;
+
+    // Register creator and create session (setup phase, not measured)
+    await new Promise((resolveSetup) => {
+      const email = `load-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
+      const displayName = `load-creator-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const body = JSON.stringify({ email, password: "load-test-pw-12", displayName });
+      const req = http.request(
+        {
+          hostname,
+          port,
+          path: "/auth/register",
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            try {
+              accessToken = JSON.parse(Buffer.concat(chunks).toString()).accessToken ?? null;
+            } catch {
+              accessToken = null;
+            }
+            resolveSetup();
+          });
+        },
+      );
+      req.on("error", () => resolveSetup());
+      req.end(body);
+    });
+
+    if (!accessToken) {
+      console.error("[load-tests] Failed to register creator for WebSocket scenario");
+      resolve(buildInvalidSnapshot(options.vus, "creator registration failed"));
+      return;
+    }
+
+    await new Promise((resolveSetup) => {
+      const sessionName = `load-ws-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const body = JSON.stringify({ name: sessionName });
+      const req = http.request(
+        {
+          hostname,
+          port,
+          path: "/sessions",
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(body),
+            authorization: `Bearer ${accessToken}`,
+          },
+        },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks).toString());
+              sessionId = body.session?.id ?? null;
+            } catch {
+              sessionId = null;
+            }
+            resolveSetup();
+          });
+        },
+      );
+      req.on("error", () => resolveSetup());
+      req.end(body);
+    });
+
+    if (!sessionId) {
+      console.error("[load-tests] Failed to create session for WebSocket scenario");
+      resolve(buildInvalidSnapshot(options.vus, "session creation failed"));
+      return;
+    }
+
+    console.log(`[load-tests] WebSocket scenario using session ${sessionId}`);
+
+    // Phase 2: Measured WebSocket scenario
     const runStart = performance.now();
     let seq = 0;
     const clients = new Map();
-    const connectionDuration = new Stats();
-    const messageDuration = new Stats();
+    const connectionEstablishmentDuration = new Stats(); // Time from dial to open
+    const connectionLifetimeDuration = new Stats(); // Time from open to close/stop
+    const messageRoundtripDuration = new Stats();
     let connectionSuccess = 0;
     let connectionFail = 0;
-    let messagesReceived = 0;
+    let connectionTimeouts = 0;
+    let protocolErrors = 0;
+    let unexpectedCloses = 0;
     let messagesSent = 0;
+    let messagesReceived = 0;
+    let joinResponsesReceived = 0;
     let timeout = null;
+
+    // Track in-flight join requests for correlation
+    const pendingJoins = new Map(); // requestId -> { startTime, record }
 
     function scheduleConnection() {
       const id = ++seq;
-      const preConnectAt = performance.now();
+      const dialStartAt = performance.now(); // Start of connection attempt
       const record = {
         id,
         socket: null,
-        connectedAt: preConnectAt,
+        dialStartAt,
         opened: false,
-        durationRecorded: false,
+        connectedAt: null, // Set at open event
+        connectionDurationRecorded: false,
+        lifetimeDurationRecorded: false,
+        joinRequestId: null,
+        joinStartTime: null,
       };
       const ws = new WebSocket(WS_URL + "?vu=" + id);
       record.socket = ws;
       clients.set(id, record);
 
       ws.once("open", () => {
+        const openAt = performance.now();
         record.opened = true;
-        record.connectedAt = performance.now();
+        record.connectedAt = openAt;
         connectionSuccess += 1;
+
+        // Record connection establishment latency (dial to open)
+        connectionEstablishmentDuration.push(openAt - record.dialStartAt);
+
+        // Send session.join with unique requestId
+        const requestId = `join-${id}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+        record.joinRequestId = requestId;
+        record.joinStartTime = performance.now();
+
         const payload = JSON.stringify({
           type: "session.join",
-          requestId: "vu-" + id,
-          payload: { sessionId: "00000000-0000-0000-0000-000000000000" },
+          requestId,
+          payload: { sessionId },
         });
         try {
           ws.send(payload);
           messagesSent += 1;
+          // Track this in-flight request
+          pendingJoins.set(requestId, { startTime: record.joinStartTime, record });
         } catch (e) {
           // send failure surfaces as an error/close below; do not double-count.
         }
       });
-      ws.once("error", () => {
-        // Transport-level failure. The subsequent 'close' records a duration
-        // only if the socket had opened; pre-open failures contribute no
-        // connection-duration sample (nothing completed to measure).
+
+      ws.once("error", (err) => {
+        // Transport-level failure
         connectionFail += 1;
+        if (record.opened && !record.connectionDurationRecorded) {
+          record.connectionDurationRecorded = true;
+          connectionLifetimeDuration.push(performance.now() - record.connectedAt);
+        }
       });
-      ws.once("close", () => {
-        if (record.opened && !record.durationRecorded) {
-          record.durationRecorded = true;
-          connectionDuration.push(performance.now() - record.connectedAt);
+
+      ws.once("close", (code, reason) => {
+        if (record.opened && !record.lifetimeDurationRecorded) {
+          record.lifetimeDurationRecorded = true;
+          connectionLifetimeDuration.push(performance.now() - record.connectedAt);
+        }
+        // Track unexpected closes (not clean 1000/1001)
+        if (record.opened && code !== 1000 && code !== 1001) {
+          unexpectedCloses += 1;
         }
         clients.delete(id);
       });
-      ws.on("message", () => {
-        const base = record.opened ? record.connectedAt : preConnectAt;
-        messageDuration.push(performance.now() - base);
+
+      ws.on("message", (data) => {
         messagesReceived += 1;
+        try {
+          const frame = JSON.parse(String(data));
+          // Correlate by requestId and expected type
+          if (frame.requestId && pendingJoins.has(frame.requestId)) {
+            const pending = pendingJoins.get(frame.requestId);
+            if (pending && frame.type === "session.joined") {
+              // Valid response to our join request
+              const latency = performance.now() - pending.startTime;
+              messageRoundtripDuration.push(latency);
+              joinResponsesReceived += 1;
+              pendingJoins.delete(frame.requestId);
+              return;
+            }
+            // If it's an error response to our join, still count as completed
+            if (pending && frame.type === "error") {
+              const latency = performance.now() - pending.startTime;
+              messageRoundtripDuration.push(latency);
+              protocolErrors += 1;
+              pendingJoins.delete(frame.requestId);
+              return;
+            }
+          }
+          // Ignore unrelated frames (broadcasts, session.state, etc.)
+          // They are counted in messagesReceived but NOT in round-trip latency
+        } catch (e) {
+          protocolErrors += 1;
+        }
       });
     }
 
     function stop() {
       const stopAt = performance.now();
-      // Capture completed connection durations for sockets still open at stop.
-      // Each successfully opened connection contributes exactly one sample:
-      // either on its natural 'close' or here (open -> stop). This is what
-      // keeps connectionDuration.count === connectionSuccess by construction
-      // instead of silently emitting zero samples when the harness stops
-      // before clients close on their own.
+
+      // Count any pending joins that timed out
+      connectionTimeouts = pendingJoins.size;
+      pendingJoins.clear();
+
+      // Capture completed connection lifetimes for sockets still open at stop
       clients.forEach((rec) => {
-        if (rec.opened && !rec.durationRecorded) {
-          rec.durationRecorded = true;
-          connectionDuration.push(stopAt - rec.connectedAt);
+        if (rec.opened && !rec.lifetimeDurationRecorded) {
+          rec.lifetimeDurationRecorded = true;
+          connectionLifetimeDuration.push(stopAt - rec.connectedAt);
         }
       });
+
       const connectionsOpenAtEnd = [...clients.values()].filter((r) => r.opened).length;
       const totalConnections = connectionSuccess;
+
       clients.forEach((c) => {
         try {
           c.socket.terminate();
         } catch (e) {}
       });
+
       if (timeout) clearTimeout(timeout);
+
       const durationSeconds = (stopAt - runStart) / 1000;
       const summary = {
         durationSeconds,
@@ -490,31 +642,53 @@ function websocketScenario(options) {
         messagesReceived,
         messagesSent,
       };
-      resolve(buildSnapshot("websocket-connections", options.vus, summary));
+
+      resolve(buildSnapshot("websocket-connections", options.vus, summary, {
+        connectionEstablishmentDuration,
+        connectionLifetimeDuration,
+        messageRoundtripDuration,
+        connectionSuccess,
+        connectionFail,
+        connectionTimeouts,
+        protocolErrors,
+        unexpectedCloses,
+        messagesReceived,
+        messagesSent,
+        joinResponsesReceived,
+      }));
     }
 
-    function buildSnapshot(scenario, vus, summary) {
-      const connectionDurationCount = connectionDuration.count();
-      const messageDurationCount = messageDuration.count();
-      // Equivalent invariants to HTTP, applied per operation type (never
-      // summed across types, never fabricated):
-      // - one connection-duration sample per successfully opened connection.
-      // - one message-duration sample per received message.
-      const connOK =
-        connectionSuccess === 0
-          ? connectionDurationCount === 0
-          : connectionDurationCount === connectionSuccess;
-      const msgOK = messageDurationCount === messagesReceived;
-      const wsMeasurementOK = connectionSuccess > 0 && connOK && msgOK;
+    function buildSnapshot(scenario, vus, summary, metrics) {
+      const connectionEstablishmentCount = metrics.connectionEstablishmentDuration.count();
+      const connectionLifetimeCount = metrics.connectionLifetimeDuration.count();
+      const messageDurationCount = metrics.messageRoundtripDuration.count();
+
+      // Invariants:
+      // - one connection-establishment sample per successfully opened connection
+      // - one connection-lifetime sample per successfully opened connection
+      // - one message-duration sample per *completed measured operation* (join response)
+      const connEstabOK =
+        metrics.connectionSuccess === 0
+          ? connectionEstablishmentCount === 0
+          : connectionEstablishmentCount === metrics.connectionSuccess;
+      const connLifetimeOK =
+        metrics.connectionSuccess === 0
+          ? connectionLifetimeCount === 0
+          : connectionLifetimeCount === metrics.connectionSuccess;
+      const msgOK = messageDurationCount === metrics.joinResponsesReceived;
+      const wsMeasurementOK = metrics.connectionSuccess > 0 && connEstabOK && connLifetimeOK && msgOK;
+
       if (!wsMeasurementOK) {
         console.error(
-          `[load-tests] MEASUREMENT INVALID (ws): success=${connectionSuccess},` +
-            ` connSamples=${connectionDurationCount}, messages=${messagesReceived},` +
-            ` msgSamples=${messageDurationCount}. Refusing to treat this as a benchmark artifact.`,
+          `[load-tests] MEASUREMENT INVALID (ws): success=${metrics.connectionSuccess},` +
+            ` estabSamples=${connectionEstablishmentCount}, lifetimeSamples=${connectionLifetimeCount},` +
+            ` joinResponses=${metrics.joinResponsesReceived}, msgSamples=${messageDurationCount},` +
+            ` timeouts=${metrics.connectionTimeouts}, protocolErrors=${metrics.protocolErrors},` +
+            ` unexpectedCloses=${metrics.unexpectedCloses}. Refusing to treat this as a benchmark artifact.`,
         );
       }
+
       return {
-        // Wall-clock result timestamp (never performance.now()-derived).
         timestamp: new Date().toISOString(),
         vus,
         scenario,
@@ -523,12 +697,18 @@ function websocketScenario(options) {
           connections: summary.connections,
           connectionSuccess: summary.connectivity,
           connectionFail: summary.failures,
+          connectionTimeouts: metrics.connectionTimeouts,
+          protocolErrors: metrics.protocolErrors,
+          unexpectedCloses: metrics.unexpectedCloses,
           connectionsOpenAtEnd: summary.openAtEnd,
           messagesReceived: summary.messagesReceived,
           messagesSent: summary.messagesSent,
-          connectionDurationMs: connectionDuration,
-          messageDurationMs: messageDuration,
-          connectionDurationCount,
+          joinResponsesReceived: metrics.joinResponsesReceived,
+          connectionEstablishmentDurationMs: metrics.connectionEstablishmentDuration,
+          connectionLifetimeDurationMs: metrics.connectionLifetimeDuration,
+          messageRoundtripDurationMs: metrics.messageRoundtripDuration,
+          connectionEstablishmentCount,
+          connectionLifetimeCount,
           messageDurationCount,
         },
         pgs: pgsProbe(),
@@ -540,27 +720,39 @@ function websocketScenario(options) {
           successfulRequestsPerSec: 0,
           wsConnectionsPerSec: summary.connections / (summary.durationSeconds || 1e-9),
           wsMessageRate: summary.messagesReceived / (summary.durationSeconds || 1e-9),
-          wsMeanConnectionMs: connectionDurationCount > 0 ? connectionDuration.mean() : 0,
-          wsP50ConnectionMs: connectionDurationCount > 0 ? connectionDuration.percentile(50) : 0,
-          wsP90ConnectionMs: connectionDurationCount > 0 ? connectionDuration.percentile(90) : 0,
-          wsP95ConnectionMs: connectionDurationCount > 0 ? connectionDuration.percentile(95) : 0,
-          wsP99ConnectionMs: connectionDurationCount > 0 ? connectionDuration.percentile(99) : 0,
-          wsMeanMessageMs: messageDurationCount > 0 ? messageDuration.mean() : 0,
-          wsP50MessageMs: messageDurationCount > 0 ? messageDuration.percentile(50) : 0,
-          wsP90MessageMs: messageDurationCount > 0 ? messageDuration.percentile(90) : 0,
-          wsP95MessageMs: messageDurationCount > 0 ? messageDuration.percentile(95) : 0,
-          wsP99MessageMs: messageDurationCount > 0 ? messageDuration.percentile(99) : 0,
+          wsMeanConnectionEstabMs: connectionEstablishmentCount > 0 ? metrics.connectionEstablishmentDuration.mean() : 0,
+          wsP50ConnectionEstabMs: connectionEstablishmentCount > 0 ? metrics.connectionEstablishmentDuration.percentile(50) : 0,
+          wsP90ConnectionEstabMs: connectionEstablishmentCount > 0 ? metrics.connectionEstablishmentDuration.percentile(90) : 0,
+          wsP95ConnectionEstabMs: connectionEstablishmentCount > 0 ? metrics.connectionEstablishmentDuration.percentile(95) : 0,
+          wsP99ConnectionEstabMs: connectionEstablishmentCount > 0 ? metrics.connectionEstablishmentDuration.percentile(99) : 0,
+          wsMeanConnectionLifetimeMs: connectionLifetimeCount > 0 ? metrics.connectionLifetimeDuration.mean() : 0,
+          wsP50ConnectionLifetimeMs: connectionLifetimeCount > 0 ? metrics.connectionLifetimeDuration.percentile(50) : 0,
+          wsP90ConnectionLifetimeMs: connectionLifetimeCount > 0 ? metrics.connectionLifetimeDuration.percentile(90) : 0,
+          wsP95ConnectionLifetimeMs: connectionLifetimeCount > 0 ? metrics.connectionLifetimeDuration.percentile(95) : 0,
+          wsP99ConnectionLifetimeMs: connectionLifetimeCount > 0 ? metrics.connectionLifetimeDuration.percentile(99) : 0,
+          wsMeanMessageMs: messageDurationCount > 0 ? metrics.messageRoundtripDuration.mean() : 0,
+          wsP50MessageMs: messageDurationCount > 0 ? metrics.messageRoundtripDuration.percentile(50) : 0,
+          wsP90MessageMs: messageDurationCount > 0 ? metrics.messageRoundtripDuration.percentile(90) : 0,
+          wsP95MessageMs: messageDurationCount > 0 ? metrics.messageRoundtripDuration.percentile(95) : 0,
+          wsP99MessageMs: messageDurationCount > 0 ? metrics.messageRoundtripDuration.percentile(99) : 0,
         },
         measurement: {
           valid: wsMeasurementOK,
           ws: {
-            connectionSuccess,
-            connectionSamples: connectionDurationCount,
-            connectionExpected: connectionSuccess,
-            connectionOk: connOK,
-            messagesReceived,
+            connectionSuccess: metrics.connectionSuccess,
+            connectionEstablishmentSamples: connectionEstablishmentCount,
+            connectionEstablishmentExpected: metrics.connectionSuccess,
+            connectionEstablishmentOk: connEstabOK,
+            connectionLifetimeSamples: connectionLifetimeCount,
+            connectionLifetimeExpected: metrics.connectionSuccess,
+            connectionLifetimeOk: connLifetimeOK,
+            connectionFail: metrics.connectionFail,
+            connectionTimeouts: metrics.connectionTimeouts,
+            protocolErrors: metrics.protocolErrors,
+            unexpectedCloses: metrics.unexpectedCloses,
+            joinResponsesReceived: metrics.joinResponsesReceived,
             messageSamples: messageDurationCount,
-            messageExpected: messagesReceived,
+            messageExpected: metrics.joinResponsesReceived,
             messageOk: msgOK,
             ok: wsMeasurementOK,
           },
@@ -568,10 +760,36 @@ function websocketScenario(options) {
       };
     }
 
-    // The app owns the /ws upgrade; we only talk to it.
+    function buildInvalidSnapshot(vus, reason) {
+      return {
+        timestamp: new Date().toISOString(),
+        vus,
+        scenario: "websocket-connections",
+        http: { requests: 0, failures: 0, durationMs: new Stats(), statusCounts: {} },
+        ws: {
+          connections: 0, connectionSuccess: 0, connectionFail: 0, connectionTimeouts: 0,
+          protocolErrors: 0, unexpectedCloses: 0, connectionsOpenAtEnd: 0,
+          messagesReceived: 0, messagesSent: 0, joinResponsesReceived: 0,
+          connectionEstablishmentDurationMs: new Stats(), connectionLifetimeDurationMs: new Stats(),
+          messageRoundtripDurationMs: new Stats(),
+          connectionEstablishmentCount: 0, connectionLifetimeCount: 0, messageDurationCount: 0,
+        },
+        pgs: pgsProbe(),
+        redis: redisProbe(),
+        summary: { durationSeconds: 0, vus, requestsPerSec: 0, successfulRequestsPerSec: 0,
+          wsConnectionsPerSec: 0, wsMessageRate: 0,
+          wsMeanConnectionEstabMs: 0, wsP50ConnectionEstabMs: 0, wsP90ConnectionEstabMs: 0, wsP95ConnectionEstabMs: 0, wsP99ConnectionEstabMs: 0,
+          wsMeanConnectionLifetimeMs: 0, wsP50ConnectionLifetimeMs: 0, wsP90ConnectionLifetimeMs: 0, wsP95ConnectionLifetimeMs: 0, wsP99ConnectionLifetimeMs: 0,
+          wsMeanMessageMs: 0, wsP50MessageMs: 0, wsP90MessageMs: 0, wsP95MessageMs: 0, wsP99MessageMs: 0 },
+        measurement: { valid: false, ws: { ok: false, reason } },
+      };
+    }
+
+    // Start connections
     for (let i = 0; i < options.vus; i += 1) {
       scheduleConnection();
     }
+
     timeout = setTimeout(() => {
       stop();
     }, options.durationMs);
@@ -675,11 +893,16 @@ async function main() {
           connections: ws.connections,
           connectionSuccess: ws.connectionSuccess,
           connectionFail: ws.connectionFail,
+          connectionTimeouts: ws.connectionTimeouts,
+          protocolErrors: ws.protocolErrors,
+          unexpectedCloses: ws.unexpectedCloses,
           connectionsOpenAtEnd: ws.connectionsOpenAtEnd,
           messagesReceived: ws.messagesReceived,
           messagesSent: ws.messagesSent,
-          connectionDurationMs: ws.connectionDurationMs,
-          messageDurationMs: ws.messageDurationMs,
+          joinResponsesReceived: ws.joinResponsesReceived,
+          connectionEstablishmentDurationMs: ws.connectionEstablishmentDurationMs,
+          connectionLifetimeDurationMs: ws.connectionLifetimeDurationMs,
+          messageRoundtripDurationMs: ws.messageRoundtripDurationMs,
         },
         pgs: snapshot.pgs,
         redis: snapshot.redis,
@@ -695,6 +918,21 @@ async function main() {
           httpP90Ms: http.durationMs.percentile(90),
           httpP95Ms: http.durationMs.percentile(95),
           httpP99Ms: http.durationMs.percentile(99),
+          wsMeanConnectionEstabMs: summary.wsMeanConnectionEstabMs,
+          wsP50ConnectionEstabMs: summary.wsP50ConnectionEstabMs,
+          wsP90ConnectionEstabMs: summary.wsP90ConnectionEstabMs,
+          wsP95ConnectionEstabMs: summary.wsP95ConnectionEstabMs,
+          wsP99ConnectionEstabMs: summary.wsP99ConnectionEstabMs,
+          wsMeanConnectionLifetimeMs: summary.wsMeanConnectionLifetimeMs,
+          wsP50ConnectionLifetimeMs: summary.wsP50ConnectionLifetimeMs,
+          wsP90ConnectionLifetimeMs: summary.wsP90ConnectionLifetimeMs,
+          wsP95ConnectionLifetimeMs: summary.wsP95ConnectionLifetimeMs,
+          wsP99ConnectionLifetimeMs: summary.wsP99ConnectionLifetimeMs,
+          wsMeanMessageMs: summary.wsMeanMessageMs,
+          wsP50MessageMs: summary.wsP50MessageMs,
+          wsP90MessageMs: summary.wsP90MessageMs,
+          wsP95MessageMs: summary.wsP95MessageMs,
+          wsP99MessageMs: summary.wsP99MessageMs,
           wsMessageRate: ws.messagesReceived / elapsed,
         },
       },

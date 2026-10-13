@@ -63,6 +63,14 @@ independently (connection-keyed, no dedup); heartbeat: server pings arrive,
 a non-ponging raw TCP peer is terminated by the sweep while a healthy
 client survives, registry drains to the healthy set.
 
+### `tests/integration/ws-measurement.test.ts` (Phase 8.2a measurement correctness)
+
+Focused tests validating the load-test harness measurement invariants:
+- Response correlation: only `session.joined` with matching `requestId` counts as a response to `session.join`
+- Ignored unrelated frames: `session.state`, `presence.snapshot`, and other broadcasts do not contribute to round-trip latency
+- Timeout handling: join requests without a response within the timeout window are counted as timeouts, not fabricated samples
+- Incomplete measurements: harness refuses to emit results when sample counts don't match completed operations
+
 ## Running
 
 ```bash
@@ -80,3 +88,47 @@ pnpm test:integration
   instances; containerized instances + Nginx arrive in a later phase.
 - Load/backpressure behavior (k6, later phase).
 - Authentication on the upgrade path (auth phase).
+
+---
+
+## Load-Test Measurement Specification (Phase 8.2a)
+
+### What IS measured
+
+1. **Connection establishment latency** (`ws_connection_duration_ms` / `wsConnectionDurationMs`)
+   - Monotonic timestamp at TCP connect → WebSocket `open` event
+   - One sample per successfully opened connection
+   - Reported separately from message latency
+
+2. **Message round-trip latency** (`ws_message_roundtrip_duration_ms` / `wsMessageRoundtripDurationMs`)
+   - Unique `requestId` generated per `session.join` request
+   - Start timestamp recorded immediately before `send()`
+   - Latency recorded ONLY when matching `session.joined` response arrives with same `requestId`
+   - Error responses (`type: "error"`) to the join request also complete the measurement
+   - One sample per completed measured operation (join request with response)
+
+3. **Counters tracked separately**
+   - `ws_connection_success`: successful WebSocket handshakes
+   - `ws_connection_fail`: transport-level failures (pre-open)
+   - `ws_connection_timeouts`: join requests that never received a response
+   - `ws_protocol_errors`: invalid JSON, invalid envelope, error responses
+   - `ws_unexpected_closes`: connections closed with codes other than 1000/1001
+   - `ws_messages_received`: all frames received (including broadcasts)
+   - `ws_messages_sent`: all frames sent
+   - `ws_join_responses_received`: completed measured operations
+
+### What is NOT measured (and why)
+
+- **Open-to-first-frame duration**: This conflates connection establishment with server processing time and is not a request-response latency. Reported separately as connection latency.
+- **Unrelated broadcasts**: `session.state`, `presence.snapshot`, `doubt.created`, etc. are counted in `messagesReceived` but do NOT generate latency samples. They are server-initiated events with `requestId: null` and no client request to correlate with.
+- **Fabricated samples**: If a join request times out or the connection drops before a response, no latency sample is invented. The measurement is marked invalid if `joinResponsesReceived !== messageRoundtripSamples`.
+- **Authentication handshake**: `auth.authenticate` → `auth.authenticated` is a separate measured operation (not included in this scenario).
+
+### Measurement validity
+
+A result is marked `measurement.valid: false` when:
+- `connectionDurationSamples !== connectionSuccess` (missing/extra connection samples)
+- `messageRoundtripSamples !== joinResponsesReceived` (missing/extra latency samples)
+- Any connection/timeouts/protocol errors occurred without corresponding samples
+
+This ensures the reported percentiles (p50, p95, p99) are computed only from valid, complete measurements.
